@@ -1,8 +1,64 @@
+=== ARQUIVO: \README.MD ===
+# ⚡ @nicolasarths/devserver
+
+> ⚠️ **Aviso de Transparência:** Este projeto foi criado inteiramente por meio de desenvolvimento assistido por IA. Recomenda-se cautela na utilização em ambientes críticos e a revisão prévia do código-fonte antes do uso.
+
+Servidor de desenvolvimento **zero-config** e **zero-dependências** com Live Reload via SSE, snapshots automáticos e deploy em 1 tecla para **GitHub**, **GitHub Pages** e **NPM** — sem despejar arquivos de configuração dentro dos seus projetos.
+
+## 🚀 Instalação (1x no computador)
+
+```bash
+npm i -g @nicolasarths/devserver
+```
+
+## 💻 Como usar
+
+Abra o terminal na pasta de qualquer projeto e rode o comando exclusivo:
+
+```bash
+nic-dev
+```
+
+*(Também funciona como `nicolas-devserver` ou sem instalação prévia via `npx -y @nicolasarths/devserver@latest`.)*
+
+## ⚙️ Como funciona na prática
+
+* **Zero conflito com o projeto:** Roda globalmente sem criar pastas de servidor nem alterar o `package.json` do projeto — não colide com `server.js`, `server/` ou `npm run dev` existentes.
+* **Live Reload instantâneo:** Sobe um servidor estático local (porta `8081` com incremento automático se ocupada), libera CORS e recarrega o navegador automaticamente ao salvar qualquer arquivo (`Ctrl + S`).
+* **Auto-detecção de projeto:**
+  * **Projeto Web / GitHub:** Faz commit, push e acompanha o build do **GitHub Pages** até a atualização entrar no ar.
+  * **Pacote NPM:** Incrementa a versão patch, faz push no GitHub e executa `npm publish` automaticamente.
+* **Snapshot contínuo:** Mantém um `projeto_completo.txt` limpo e atualizado na raiz a cada alteração salva.
+* **Auto-Update silencioso:** Ao salvar arquivos, verifica (com trava de 60 segundos) se há versão mais nova no NPM e atualiza o servidor automaticamente.
+
+## 📋 Comandos no terminal
+
+* **`ENTER` vazio** — executa `git add .`, `commit` (`"Update sem descrição"`) e `push` (e publica no NPM se for pacote).
+* **`<mensagem> + ENTER`** — publica usando a sua mensagem de commit.
+* **`[2]`** — abre o assistente para criar um repositório no GitHub, ativar GitHub Pages e salvar suas credenciais globalmente no sistema.
+* **`[3]`** — ajusta porta HTTP, branch principal ou nome do repositório.
+* **`[0]`** — encerra o servidor.
+
+## 🔍 Arquitetura e Auditoria do Código
+
+Para quem deseja inspecionar o código-fonte e verificar que não há dependências ocultas ou código malicioso, todo o servidor utiliza **apenas APIs nativas do Node.js** (`fs`, `http`, `path`, `os`, `child_process`, `readline` e `fetch` nativo) e está dividido em módulos pequenos de responsabilidade única:
+
+* **`index.js`** — Ponto de entrada; inicializa o servidor HTTP, watcher e menu.
+* **`config.js`** — Lê `process.cwd()` para detectar se a pasta atual é um pacote NPM ou projeto Web/GitHub e salva preferências básicas em `.devserver.json`.
+* **`http.js` e `livereload.js`** — Servem arquivos estáticos localmente e injetam um `<script>` de `EventSource` (`/livereload`) nos HTMLs para recarregar a página ao salvar.
+* **`watcher.js` e `builder.js`** — Monitoram alterações em tempo real e concatenam os arquivos de texto válidos em `projeto_completo.txt`.
+* **`auto-updater.js`** — Consulta a API pública do registro NPM (`registry.npmjs.org`) com trava de 60s e extrai o tarball oficial caso exista versão superior.
+* **`deploy.js` e `github/`** — Automação local de comandos `git` e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
+
+## 📄 Licença
+
+MIT © [Nicolas Arths](https://github.com/nicolasarths)
+
 === ARQUIVO: \server\auto-updater.js ===
 /**
  * Auto-Updater do Pacote @nicolasarths/devserver
  * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente e atualizar
- * APENAS diretórios locais comprovadamente pertencentes ao @nicolasarths/devserver, sem tocar em pastas server/ de terceiros.
+ * a instalação ativa do pacote (global ou local comprovada), sem nunca tocar em pastas do projeto do usuário.
  */
 const fs = require("fs");
 const os = require("os");
@@ -27,33 +83,23 @@ function isDiretorioDoDevServer(dir) {
   }
 }
 
-function localizarCopiaLocalInstalada(rootDir) {
-  const candidatos = [
-    __dirname,
-    path.join(rootDir, ".devserver"),
-    path.join(rootDir, "devserver"),
-    path.join(rootDir, "server")
-  ];
+function localizarInstalacaoAtiva() {
+  const norm = __dirname.replace(/\\/g, "/").toLowerCase();
+  // Ignora cache efêmero do npx (_npx), pois o npx sempre baixa @latest sob demanda
+  if (norm.includes("/_npx/")) {
+    return null;
+  }
 
-  for (const dir of candidatos) {
-    const norm = dir.replace(/\\/g, "/").toLowerCase();
-    if (norm.includes("/_npx/") || norm.includes("/node_modules/")) {
-      continue;
-    }
-
-    if (dir.startsWith(rootDir) && isDiretorioDoDevServer(dir)) {
-      return dir;
-    }
+  // Funciona tanto para instalação global (npm i -g) quanto para execução direta na pasta do pacote
+  if (isDiretorioDoDevServer(__dirname)) {
+    return __dirname;
   }
 
   return null;
 }
 
 function obterVersaoLocal(destinoDir) {
-  const pkgPath = destinoDir
-    ? path.join(destinoDir, "package.json")
-    : path.join(__dirname, "package.json");
-
+  const pkgPath = path.join(destinoDir, "package.json");
   if (!fs.existsSync(pkgPath)) return null;
   try {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
@@ -116,12 +162,10 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
       throw new Error("Estrutura do pacote extraído inválida.");
     }
 
-    fs.mkdirSync(destinoDir, { recursive: true });
     copiarArquivosAtualizados(packageRoot, destinoDir);
     limparCacheModulosServer(destinoDir);
 
-    const nomePastaRel = path.relative(process.cwd(), destinoDir) || ".";
-    console.log(`🔄 [Auto-Update] Cópia local (${nomePastaRel}/) atualizada para v${novaVersao}!`);
+    console.log(`🔄 [Auto-Update] @nicolasarths/devserver atualizado para v${novaVersao} com sucesso!`);
     return true;
   } finally {
     try {
@@ -142,10 +186,10 @@ async function verificarEAtualizarServidor(rootDir, config) {
   atualizacaoEmAndamento = true;
 
   try {
-    const copiaLocalDir = localizarCopiaLocalInstalada(rootDir);
-    if (!copiaLocalDir) return false;
+    const instalacaoDir = localizarInstalacaoAtiva();
+    if (!instalacaoDir) return false;
 
-    const versaoLocal = obterVersaoLocal(copiaLocalDir);
+    const versaoLocal = obterVersaoLocal(instalacaoDir);
     if (!versaoLocal) return false;
 
     const controller = new AbortController();
@@ -167,7 +211,7 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
     if (compararSemver(versaoRemota, versaoLocal) > 0) {
       console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
-      return await baixarEAplicarAtualizacao(tarballUrl, copiaLocalDir, versaoRemota);
+      return await baixarEAplicarAtualizacao(tarballUrl, instalacaoDir, versaoRemota);
     }
 
     return false;
@@ -180,8 +224,7 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
 module.exports = {
   verificarEAtualizarServidor,
-  isDiretorioDoDevServer,
-  copiarArquivosAtualizados
+  isDiretorioDoDevServer
 };
 
 === ARQUIVO: \server\builder.js ===
@@ -1150,75 +1193,16 @@ module.exports = { criarServidorHttp };
 
 /**
  * Ponto de Entrada do Universal Dev Server
- * Responsabilidade: Verificar conflitos de server/server.js pré-existentes, provisionar .devserver/ isolado se necessário,
- * iniciar build, watcher, HTTP sem duplicação de listeners e menu interativo.
+ * Responsabilidade: Iniciar build, watcher, servidor HTTP sem duplicação de listeners e menu interativo na pasta atual.
  */
-const fs = require("fs");
-const path = require("path");
 const { carregarConfig } = require("./config");
 const { criarServidorHttp } = require("./http");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { iniciarWatcher } = require("./watcher");
 const { iniciarMenuInterativo } = require("./menu");
-const { isDiretorioDoDevServer, copiarArquivosAtualizados } = require("./auto-updater");
 
 const ROOT_DIR = process.cwd();
 const config = carregarConfig(ROOT_DIR);
-
-function provisionarCopiaIsoladaDevServer(rootDir) {
-  const destinoDevServer = path.join(rootDir, ".devserver");
-  const launcherRaiz = path.join(rootDir, "devserver.js");
-
-  // Copia os arquivos do pacote atual (__dirname) para .devserver/ se ainda não existir
-  if (!fs.existsSync(destinoDevServer)) {
-    fs.mkdirSync(destinoDevServer, { recursive: true });
-    copiarArquivosAtualizados(__dirname, destinoDevServer);
-  }
-
-  // Cria o atalho devserver.js na raiz para permitir rodar `node devserver` sem conflitar com `node server`
-  if (!fs.existsSync(launcherRaiz)) {
-    const conteudoLauncher = [
-      "#!/usr/bin/env node",
-      "// Atalho gerado automaticamente pelo @nicolasarths/devserver para evitar conflito com server.js/server/",
-      'require("./.devserver/index.js");',
-      ""
-    ].join("\n");
-    fs.writeFileSync(launcherRaiz, conteudoLauncher, "utf-8");
-  }
-}
-
-function verificarSalvaguardaServidorExistente(rootDir, isNpmPackage) {
-  if (isNpmPackage) return [];
-
-  const serverJsRaiz = path.join(rootDir, "server.js");
-  const pastaServer = path.join(rootDir, "server");
-  const temServerJs = fs.existsSync(serverJsRaiz) && fs.statSync(serverJsRaiz).isFile();
-  const temPastaServer = fs.existsSync(pastaServer) && fs.statSync(pastaServer).isDirectory();
-  const avisos = [];
-
-  if (temPastaServer) {
-    const ehNossoPacote = isDiretorioDoDevServer(pastaServer);
-    const normAtual = __dirname.replace(/\\/g, "/").toLowerCase();
-
-    if (!ehNossoPacote) {
-      provisionarCopiaIsoladaDevServer(rootDir);
-      avisos.push(`• Detectada pasta "server/" própria do projeto (não pertence ao @nicolasarths/devserver).`);
-      avisos.push(`• Salvaguarda ativada: a pasta "server/" original foi preservada intacta.`);
-      avisos.push(`• Instalado automaticamente em ".devserver/" + atalho "devserver.js" (rode com: node devserver).`);
-      avisos.push(`  👉 Caso "server/" seja apenas uma versão antiga sem package.json do nosso dev server, você pode deletá-la.`);
-    } else if (normAtual.includes("/_npx/")) {
-      avisos.push(`• Você rodou via npx, mas já existe uma cópia local em "server/". Pode deletar "server/" se quiser usar apenas npx.`);
-    }
-  } else if (temServerJs) {
-    provisionarCopiaIsoladaDevServer(rootDir);
-    avisos.push(`• Detectado "server.js" próprio na raiz do projeto.`);
-    avisos.push(`• Salvaguarda ativada: instalado em ".devserver/" + atalho "devserver.js" (rode com: node devserver).`);
-  }
-
-  return avisos;
-}
-
-const avisosSalvaguarda = verificarSalvaguardaServidorExistente(ROOT_DIR, config.isNpmPackage);
 
 // 1. Executa hooks e gera projeto_completo.txt na inicialização
 executarHooksOpcionais(ROOT_DIR);
@@ -1247,13 +1231,6 @@ function iniciarEscuta(portaAtual) {
     console.log(`⚡ Dev Server [${config.projectName}] rodando em:`);
     console.log(`   👉 http://localhost:${portaAtual}`);
     console.log(`📝 projeto_completo.txt sincronizado.`);
-
-    if (avisosSalvaguarda.length > 0) {
-      console.log(`--------------------------------------------------`);
-      console.log(`🛡️  SALVAGUARDA DE ARQUIVOS ATIVADA:`);
-      avisosSalvaguarda.forEach((msg) => console.log(msg));
-    }
-
     console.log(`==================================================`);
 
     iniciarMenuInterativo(ROOT_DIR, config);
@@ -1456,12 +1433,12 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.4",
-  "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
+  "version": "1.0.6",
+  "description": "Servidor de desenvolvimento zero-config com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
-    "devserver": "index.js",
-    "nic-dev": "index.js"
+    "nic-dev": "index.js",
+    "nicolas-devserver": "index.js"
   },
   "license": "MIT",
   "publishConfig": {
@@ -1469,6 +1446,62 @@ module.exports = { iniciarMenuInterativo };
   }
 }
 
+
+=== ARQUIVO: \server\README.MD ===
+# ⚡ @nicolasarths/devserver
+
+> ⚠️ **Aviso de Transparência:** Este projeto foi criado inteiramente por meio de desenvolvimento assistido por IA. Recomenda-se cautela na utilização em ambientes críticos e a revisão prévia do código-fonte antes do uso.
+
+Servidor de desenvolvimento **zero-config** e **zero-dependências** com Live Reload via SSE, snapshots automáticos e deploy em 1 tecla para **GitHub**, **GitHub Pages** e **NPM** — sem despejar arquivos de configuração dentro dos seus projetos.
+
+## 🚀 Instalação (1x no computador)
+
+```bash
+npm i -g @nicolasarths/devserver
+```
+
+## 💻 Como usar
+
+Abra o terminal na pasta de qualquer projeto e rode o comando exclusivo:
+
+```bash
+nic-dev
+```
+
+*(Também funciona como `nicolas-devserver` ou sem instalação prévia via `npx -y @nicolasarths/devserver@latest`.)*
+
+## ⚙️ Como funciona na prática
+
+* **Zero conflito com o projeto:** Roda globalmente sem criar pastas de servidor nem alterar o `package.json` do projeto — não colide com `server.js`, `server/` ou `npm run dev` existentes.
+* **Live Reload instantâneo:** Sobe um servidor estático local (porta `8081` com incremento automático se ocupada), libera CORS e recarrega o navegador automaticamente ao salvar qualquer arquivo (`Ctrl + S`).
+* **Auto-detecção de projeto:**
+  * **Projeto Web / GitHub:** Faz commit, push e acompanha o build do **GitHub Pages** até a atualização entrar no ar.
+  * **Pacote NPM:** Incrementa a versão patch, faz push no GitHub e executa `npm publish` automaticamente.
+* **Snapshot contínuo:** Mantém um `projeto_completo.txt` limpo e atualizado na raiz a cada alteração salva.
+* **Auto-Update silencioso:** Ao salvar arquivos, verifica (com trava de 60 segundos) se há versão mais nova no NPM e atualiza o servidor automaticamente.
+
+## 📋 Comandos no terminal
+
+* **`ENTER` vazio** — executa `git add .`, `commit` (`"Update sem descrição"`) e `push` (e publica no NPM se for pacote).
+* **`<mensagem> + ENTER`** — publica usando a sua mensagem de commit.
+* **`[2]`** — abre o assistente para criar um repositório no GitHub, ativar GitHub Pages e salvar suas credenciais globalmente no sistema.
+* **`[3]`** — ajusta porta HTTP, branch principal ou nome do repositório.
+* **`[0]`** — encerra o servidor.
+
+## 🔍 Arquitetura e Auditoria do Código
+
+Para quem deseja inspecionar o código-fonte e verificar que não há dependências ocultas ou código malicioso, todo o servidor utiliza **apenas APIs nativas do Node.js** (`fs`, `http`, `path`, `os`, `child_process`, `readline` e `fetch` nativo) e está dividido em módulos pequenos de responsabilidade única:
+
+* **`index.js`** — Ponto de entrada; inicializa o servidor HTTP, watcher e menu.
+* **`config.js`** — Lê `process.cwd()` para detectar se a pasta atual é um pacote NPM ou projeto Web/GitHub e salva preferências básicas em `.devserver.json`.
+* **`http.js` e `livereload.js`** — Servem arquivos estáticos localmente e injetam um `<script>` de `EventSource` (`/livereload`) nos HTMLs para recarregar a página ao salvar.
+* **`watcher.js` e `builder.js`** — Monitoram alterações em tempo real e concatenam os arquivos de texto válidos em `projeto_completo.txt`.
+* **`auto-updater.js`** — Consulta a API pública do registro NPM (`registry.npmjs.org`) com trava de 60s e extrai o tarball oficial caso exista versão superior.
+* **`deploy.js` e `github/`** — Automação local de comandos `git` e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
+
+## 📄 Licença
+
+MIT © [Nicolas Arths](https://github.com/nicolasarths)
 
 === ARQUIVO: \server\watcher.js ===
 /**
