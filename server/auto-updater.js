@@ -1,7 +1,7 @@
 /**
  * Auto-Updater do Pacote @nicolasarths/devserver
  * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente e atualizar
- * a instalação ativa do pacote (global ou local comprovada), sem nunca tocar em pastas do projeto do usuário.
+ * a instalação ativa do pacote, retornando o status claro para o watcher exibir ao salvar arquivos.
  */
 const fs = require("fs");
 const os = require("os");
@@ -28,12 +28,10 @@ function isDiretorioDoDevServer(dir) {
 
 function localizarInstalacaoAtiva() {
   const norm = __dirname.replace(/\\/g, "/").toLowerCase();
-  // Ignora cache efêmero do npx (_npx), pois o npx sempre baixa @latest sob demanda
   if (norm.includes("/_npx/")) {
     return null;
   }
 
-  // Funciona tanto para instalação global (npm i -g) quanto para execução direta na pasta do pacote
   if (isDiretorioDoDevServer(__dirname)) {
     return __dirname;
   }
@@ -107,8 +105,6 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
 
     copiarArquivosAtualizados(packageRoot, destinoDir);
     limparCacheModulosServer(destinoDir);
-
-    console.log(`🔄 [Auto-Update] @nicolasarths/devserver atualizado para v${novaVersao} com sucesso!`);
     return true;
   } finally {
     try {
@@ -118,23 +114,29 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
 }
 
 async function verificarEAtualizarServidor(rootDir, config) {
-  if (config?.isNpmPackage) return false;
+  if (config?.isNpmPackage) {
+    return { status: "skipped" };
+  }
+
+  const instalacaoDir = localizarInstalacaoAtiva();
+  if (!instalacaoDir) {
+    return { status: "npx-ephemeral" };
+  }
+
+  const versaoLocal = obterVersaoLocal(instalacaoDir);
+  if (!versaoLocal) {
+    return { status: "skipped" };
+  }
 
   const agora = Date.now();
   if (atualizacaoEmAndamento || agora - ultimaVerificacaoTimestamp < COOLDOWN_MS) {
-    return false;
+    return { status: "cooldown", versaoLocal };
   }
 
   ultimaVerificacaoTimestamp = agora;
   atualizacaoEmAndamento = true;
 
   try {
-    const instalacaoDir = localizarInstalacaoAtiva();
-    if (!instalacaoDir) return false;
-
-    const versaoLocal = obterVersaoLocal(instalacaoDir);
-    if (!versaoLocal) return false;
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
 
@@ -144,22 +146,27 @@ async function verificarEAtualizarServidor(rootDir, config) {
     });
     clearTimeout(timeout);
 
-    if (!res.ok) return false;
+    if (!res.ok) {
+      return { status: "offline", versaoLocal };
+    }
 
     const meta = await res.json();
     const versaoRemota = meta?.version;
     const tarballUrl = meta?.dist?.tarball;
 
-    if (!versaoRemota || !tarballUrl) return false;
-
-    if (compararSemver(versaoRemota, versaoLocal) > 0) {
-      console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
-      return await baixarEAplicarAtualizacao(tarballUrl, instalacaoDir, versaoRemota);
+    if (!versaoRemota || !tarballUrl) {
+      return { status: "offline", versaoLocal };
     }
 
-    return false;
-  } catch (_) {
-    return false;
+    if (compararSemver(versaoRemota, versaoLocal) > 0) {
+      console.log(`⬆️  [DevServer] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal}) — baixando atualização...`);
+      await baixarEAplicarAtualizacao(tarballUrl, instalacaoDir, versaoRemota);
+      return { status: "updated", versaoLocal, versaoRemota };
+    }
+
+    return { status: "up-to-date", versaoLocal };
+  } catch (err) {
+    return { status: "error", versaoLocal, erro: err.message };
   } finally {
     atualizacaoEmAndamento = false;
   }

@@ -35,6 +35,7 @@ nic-dev
 
 * **`ENTER` vazio** — executa `git add .`, `commit` (`"Update sem descrição"`) e `push` (e publica no NPM se for pacote).
 * **`<mensagem> + ENTER`** — publica usando a sua mensagem de commit.
+* **`/menu`** — exibe novamente o menu completo de opções do servidor.
 * **`[2]`** — abre o assistente para criar um repositório no GitHub, ativar GitHub Pages e salvar suas credenciais globalmente no sistema.
 * **`[3]`** — ajusta porta HTTP, branch principal ou nome do repositório.
 * **`[0]`** — encerra o servidor.
@@ -48,7 +49,7 @@ Para quem deseja inspecionar o código-fonte e verificar que não há dependênc
 * **`http.js` e `livereload.js`** — Servem arquivos estáticos localmente e injetam um `<script>` de `EventSource` (`/livereload`) nos HTMLs para recarregar a página ao salvar.
 * **`watcher.js` e `builder.js`** — Monitoram alterações em tempo real e concatenam os arquivos de texto válidos em `projeto_completo.txt`.
 * **`auto-updater.js`** — Consulta a API pública do registro NPM (`registry.npmjs.org`) com trava de 60s e extrai o tarball oficial caso exista versão superior.
-* **`deploy.js` e `github/`** — Automação local de comandos `git` e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
+* **`deploy.js`, `logger.js` e `github/`** — Automação silenciosa de comandos `git`, resumos limpos de deploy e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
 
 ## 📄 Licença
 
@@ -58,7 +59,7 @@ MIT © [Nicolas Arths](https://github.com/nicolasarths)
 /**
  * Auto-Updater do Pacote @nicolasarths/devserver
  * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente e atualizar
- * a instalação ativa do pacote (global ou local comprovada), sem nunca tocar em pastas do projeto do usuário.
+ * a instalação ativa do pacote, retornando o status claro para o watcher exibir ao salvar arquivos.
  */
 const fs = require("fs");
 const os = require("os");
@@ -85,12 +86,10 @@ function isDiretorioDoDevServer(dir) {
 
 function localizarInstalacaoAtiva() {
   const norm = __dirname.replace(/\\/g, "/").toLowerCase();
-  // Ignora cache efêmero do npx (_npx), pois o npx sempre baixa @latest sob demanda
   if (norm.includes("/_npx/")) {
     return null;
   }
 
-  // Funciona tanto para instalação global (npm i -g) quanto para execução direta na pasta do pacote
   if (isDiretorioDoDevServer(__dirname)) {
     return __dirname;
   }
@@ -164,8 +163,6 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
 
     copiarArquivosAtualizados(packageRoot, destinoDir);
     limparCacheModulosServer(destinoDir);
-
-    console.log(`🔄 [Auto-Update] @nicolasarths/devserver atualizado para v${novaVersao} com sucesso!`);
     return true;
   } finally {
     try {
@@ -175,23 +172,29 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
 }
 
 async function verificarEAtualizarServidor(rootDir, config) {
-  if (config?.isNpmPackage) return false;
+  if (config?.isNpmPackage) {
+    return { status: "skipped" };
+  }
+
+  const instalacaoDir = localizarInstalacaoAtiva();
+  if (!instalacaoDir) {
+    return { status: "npx-ephemeral" };
+  }
+
+  const versaoLocal = obterVersaoLocal(instalacaoDir);
+  if (!versaoLocal) {
+    return { status: "skipped" };
+  }
 
   const agora = Date.now();
   if (atualizacaoEmAndamento || agora - ultimaVerificacaoTimestamp < COOLDOWN_MS) {
-    return false;
+    return { status: "cooldown", versaoLocal };
   }
 
   ultimaVerificacaoTimestamp = agora;
   atualizacaoEmAndamento = true;
 
   try {
-    const instalacaoDir = localizarInstalacaoAtiva();
-    if (!instalacaoDir) return false;
-
-    const versaoLocal = obterVersaoLocal(instalacaoDir);
-    if (!versaoLocal) return false;
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
 
@@ -201,22 +204,27 @@ async function verificarEAtualizarServidor(rootDir, config) {
     });
     clearTimeout(timeout);
 
-    if (!res.ok) return false;
+    if (!res.ok) {
+      return { status: "offline", versaoLocal };
+    }
 
     const meta = await res.json();
     const versaoRemota = meta?.version;
     const tarballUrl = meta?.dist?.tarball;
 
-    if (!versaoRemota || !tarballUrl) return false;
-
-    if (compararSemver(versaoRemota, versaoLocal) > 0) {
-      console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
-      return await baixarEAplicarAtualizacao(tarballUrl, instalacaoDir, versaoRemota);
+    if (!versaoRemota || !tarballUrl) {
+      return { status: "offline", versaoLocal };
     }
 
-    return false;
-  } catch (_) {
-    return false;
+    if (compararSemver(versaoRemota, versaoLocal) > 0) {
+      console.log(`⬆️  [DevServer] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal}) — baixando atualização...`);
+      await baixarEAplicarAtualizacao(tarballUrl, instalacaoDir, versaoRemota);
+      return { status: "updated", versaoLocal, versaoRemota };
+    }
+
+    return { status: "up-to-date", versaoLocal };
+  } catch (err) {
+    return { status: "error", versaoLocal, erro: err.message };
   } finally {
     atualizacaoEmAndamento = false;
   }
@@ -1218,7 +1226,7 @@ module.exports = { criarServidorHttp };
 
 /**
  * Ponto de Entrada do Universal Dev Server
- * Responsabilidade: Iniciar build, watcher, servidor HTTP sem duplicação de listeners e menu interativo na pasta atual.
+ * Responsabilidade: Iniciar build inicial silencioso, watcher, servidor HTTP em HUD compacto de linha única e menu interativo.
  */
 const { carregarConfig } = require("./config");
 const { criarServidorHttp } = require("./http");
@@ -1229,7 +1237,7 @@ const { iniciarMenuInterativo } = require("./menu");
 const ROOT_DIR = process.cwd();
 const config = carregarConfig(ROOT_DIR);
 
-// 1. Executa hooks e gera projeto_completo.txt na inicialização
+// 1. Executa hooks e gera projeto_completo.txt silenciosamente na inicialização
 executarHooksOpcionais(ROOT_DIR);
 gerarProjetoCompleto(ROOT_DIR, config.snapshotExtensions);
 
@@ -1252,11 +1260,7 @@ function iniciarEscuta(portaAtual) {
 
   const onListening = () => {
     server.removeListener("error", onError);
-    console.log(`\n==================================================`);
-    console.log(`⚡ Dev Server [${config.projectName}] rodando em:`);
-    console.log(`   👉 http://localhost:${portaAtual}`);
-    console.log(`📝 projeto_completo.txt sincronizado.`);
-    console.log(`==================================================`);
+    console.log(`\n⚡ Dev Server [${config.projectName}] rodando em: 👉 http://localhost:${portaAtual}`);
 
     iniciarMenuInterativo(ROOT_DIR, config);
   };
@@ -1384,7 +1388,7 @@ module.exports = {
 === ARQUIVO: \server\menu.js ===
 /**
  * Menu Interativo do Terminal
- * Responsabilidade: Exibir o modo detectado automaticamente (Pacote NPM vs Projeto Web/GitHub) e rotear opções do usuário.
+ * Responsabilidade: Exibir dica formatada em linha única no boot, renderizar o menu com descrições em cinza médio sob demanda (/menu) e rotear ações.
  */
 const readline = require("readline");
 const { salvarConfig, detectarGitRemote } = require("./config");
@@ -1394,37 +1398,50 @@ const { publicarAtualizacao } = require("./deploy");
 
 const MENSAGEM_PADRAO = "Update sem descrição";
 
+// Códigos ANSI para formatação visual no terminal
+const NEGRITO = "\x1b[1m";
+const ITALICO = "\x1b[3m";
+const CINZA = "\x1b[90m";
+const CIANO = "\x1b[36m";
+const RESET = "\x1b[0m";
+
+function exibirDicaMenu() {
+  console.log(
+    `💡 ${NEGRITO}${CIANO}/menu${RESET} para opções | ` +
+    `${NEGRITO}${CIANO}Mensagem de Commit + Enter${RESET} para salvar no Github | ` +
+    `${NEGRITO}${CIANO}Somente Enter${RESET} commitar ${ITALICO}${CINZA}"${MENSAGEM_PADRAO}"${RESET}.\n`
+  );
+}
+
 function exibirMenu(rootDir, config) {
   const remote = detectarGitRemote(rootDir);
   const statusGit = remote
-    ? `${remote.githubUser}/${remote.repoName} (branch: ${config.branch || "main"})`
-    : "Não vinculado (escolha [2] para configurar)";
+    ? `${remote.githubUser}/${remote.repoName} (${config.branch || "main"})`
+    : "Não vinculado (digite 2 para configurar)";
 
   const modoDetectado = config.isNpmPackage
-    ? `📦 Pacote NPM (${config.packageName}) ➔ GitHub + Auto-Publish NPM`
-    : `🌐 Projeto Web/GitHub ➔ GitHub + Monitor GitHub Pages`;
+    ? `NPM (${config.packageName}) ➔ GitHub + NPM`
+    : `Web ➔ GitHub + Pages`;
 
   console.log(`\n--------------------------------------------------`);
-  console.log(`🔍 Modo:   ${modoDetectado}`);
-  console.log(`🐙 GitHub: ${statusGit}`);
+  console.log(`🔍 ${modoDetectado}`);
+  console.log(`🐙 ${statusGit}`);
   console.log(`--------------------------------------------------`);
-  console.log(`📋 O QUE VOCÊ DESEJA FAZER?`);
-  console.log(`  [1] 🚀 Publicar alteração (pedir mensagem de commit)`);
-  console.log(`  [2] 🐙 Configurar / Criar repositório no GitHub`);
-  console.log(`  [3] ⚙️  Configurar porta, branch ou projeto`);
-  console.log(`  [4] 📊 Ver status detalhado`);
-  console.log(`  [5] 🧹 Limpar tela`);
-  console.log(`  [0] ❌ Sair e encerrar servidor`);
-  console.log(`  💡 Atalho: digite a mensagem e dê ENTER (ou só ENTER para "${MENSAGEM_PADRAO}")`);
+  console.log(`  [1] 🚀 Novo commit          ${CINZA}(faz add, commit e push/publish agora)${RESET}`);
+  console.log(`  [2] 🐙 Repositório GitHub   ${CINZA}(cria novo repo ou vincula URL existente)${RESET}`);
+  console.log(`  [3] ⚙️  Configurar projeto   ${CINZA}(altera porta HTTP, branch ou nome do repo)${RESET}`);
+  console.log(`  [4] 📊 Ver status           ${CINZA}(mostra pasta raiz, modo, porta e remote)${RESET}`);
+  console.log(`  [5] 🧹 Limpar tela          ${CINZA}(limpa o histórico visual do terminal)${RESET}`);
+  console.log(`  [0] ❌ Sair                 ${CINZA}(encerra o servidor e o monitoramento)${RESET}`);
   console.log(`--------------------------------------------------`);
 }
 
 async function configurarOpcoesProjeto(rl, rootDir, config) {
-  console.log(`\n⚙️ CONFIGURAÇÕES DO PROJETO (${config.projectName})`);
-  const porta = await perguntar(rl, `🔌 Porta HTTP [${config.port || 8081}]: `);
-  const branch = await perguntar(rl, `🌿 Branch principal [${config.branch || "main"}]: `);
+  console.log(`\n⚙️ CONFIGURAÇÕES (${config.projectName})`);
+  const porta = await perguntar(rl, `🔌 Porta [${config.port || 8081}]: `);
+  const branch = await perguntar(rl, `🌿 Branch [${config.branch || "main"}]: `);
   const user = await perguntar(rl, `👤 Usuário GitHub [${config.githubUser}]: `);
-  const repo = await perguntar(rl, `📦 Nome do repositório [${config.repoName}]: `);
+  const repo = await perguntar(rl, `📦 Repositório [${config.repoName}]: `);
 
   const novaConfig = {
     ...config,
@@ -1435,7 +1452,7 @@ async function configurarOpcoesProjeto(rl, rootDir, config) {
   };
 
   salvarConfig(rootDir, novaConfig);
-  console.log(`✅ Configurações salvas em .devserver.json! (Se mudou a porta, reinicie o servidor).`);
+  console.log(`✅ Salvo em .devserver.json! (Reinicie se alterou a porta).`);
   return novaConfig;
 }
 
@@ -1455,7 +1472,7 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
     ocupado = false;
   }
 
-  exibirMenu(rootDir, configAtual);
+  exibirDicaMenu();
 
   rl.on("line", async (linha) => {
     if (ocupado) return;
@@ -1464,55 +1481,56 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
 
     ocupado = true;
     try {
+      if (entrada === "/menu" || entrada.toLowerCase() === "menu") {
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
       if (entrada === "0") {
-        console.log("\n👋 Encerrando servidor...");
+        console.log("\n👋 Servidor encerrado.");
         process.exit(0);
       }
 
       if (entrada === "1") {
-        const msg = await perguntar(rl, `\n📝 Digite a mensagem do commit [${MENSAGEM_PADRAO}]: `);
+        const msg = await perguntar(rl, `\n📝 Mensagem [${MENSAGEM_PADRAO}]: `);
         configAtual = await publicarAtualizacao(rl, msg || MENSAGEM_PADRAO, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "2") {
         configAtual = await executarAssistenteGitHub(rl, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "3") {
         configAtual = await configurarOpcoesProjeto(rl, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "4") {
         const remote = detectarGitRemote(rootDir);
-        console.log(`\n📊 STATUS DETALHADO:`);
-        console.log(`   • Pasta Raiz:     ${rootDir}`);
-        console.log(`   • Projeto:        ${configAtual.projectName}`);
-        console.log(`   • Tipo Detectado: ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
-        console.log(`   • Porta Config:   ${configAtual.port}`);
-        console.log(`   • Usuário GitHub: ${configAtual.githubUser || "(não definido)"}`);
-        console.log(`   • Repositório:    ${configAtual.repoName || "(não definido)"}`);
-        console.log(`   • Remote Origin:  ${remote ? remote.remoteUrl : "(não vinculado)"}`);
-        console.log(`   • Branch:         ${configAtual.branch || "main"}`);
-        exibirMenu(rootDir, configAtual);
+        console.log(`\n📊 STATUS:`);
+        console.log(`   • Raiz:   ${rootDir}`);
+        console.log(`   • Modo:   ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
+        console.log(`   • Porta:  ${configAtual.port}`);
+        console.log(`   • Remote: ${remote ? remote.remoteUrl : "(não vinculado)"}`);
+        console.log(`   • Branch: ${configAtual.branch || "main"}`);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "5") {
         console.clear();
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
-      // Se apertar apenas ENTER (vazio) ou digitar texto livre, publica direto!
       const mensagemFinal = entrada || MENSAGEM_PADRAO;
       configAtual = await publicarAtualizacao(rl, mensagemFinal, rootDir, configAtual);
-      exibirMenu(rootDir, configAtual);
+      exibirDicaMenu();
     } finally {
       ocupado = false;
     }
@@ -1524,7 +1542,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Servidor de desenvolvimento zero-config com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
@@ -1575,6 +1593,7 @@ nic-dev
 
 * **`ENTER` vazio** — executa `git add .`, `commit` (`"Update sem descrição"`) e `push` (e publica no NPM se for pacote).
 * **`<mensagem> + ENTER`** — publica usando a sua mensagem de commit.
+* **`/menu`** — exibe novamente o menu completo de opções do servidor.
 * **`[2]`** — abre o assistente para criar um repositório no GitHub, ativar GitHub Pages e salvar suas credenciais globalmente no sistema.
 * **`[3]`** — ajusta porta HTTP, branch principal ou nome do repositório.
 * **`[0]`** — encerra o servidor.
@@ -1588,7 +1607,7 @@ Para quem deseja inspecionar o código-fonte e verificar que não há dependênc
 * **`http.js` e `livereload.js`** — Servem arquivos estáticos localmente e injetam um `<script>` de `EventSource` (`/livereload`) nos HTMLs para recarregar a página ao salvar.
 * **`watcher.js` e `builder.js`** — Monitoram alterações em tempo real e concatenam os arquivos de texto válidos em `projeto_completo.txt`.
 * **`auto-updater.js`** — Consulta a API pública do registro NPM (`registry.npmjs.org`) com trava de 60s e extrai o tarball oficial caso exista versão superior.
-* **`deploy.js` e `github/`** — Automação local de comandos `git` e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
+* **`deploy.js`, `logger.js` e `github/`** — Automação silenciosa de comandos `git`, resumos limpos de deploy e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
 
 ## 📄 Licença
 
@@ -1597,10 +1616,13 @@ MIT © [Nicolas Arths](https://github.com/nicolasarths)
 === ARQUIVO: \server\watcher.js ===
 /**
  * Monitor de Sistema de Arquivos (File Watcher)
- * Responsabilidade: Detectar modificações no código-fonte, checar auto-update do servidor e disparar build + Live Reload.
+ * Responsabilidade: Detectar modificações no código-fonte (Ctrl+S), exibir status do snapshot e da verificação de atualização do pacote, e disparar Live Reload.
  */
 const fs = require("fs");
 const { verificarEAtualizarServidor } = require("./auto-updater");
+
+const CINZA = "\x1b[90m";
+const RESET = "\x1b[0m";
 
 function iniciarWatcher(rootDir, config) {
   let watchTimeout = null;
@@ -1627,13 +1649,24 @@ function iniciarWatcher(rootDir, config) {
     watchTimeout = setTimeout(async () => {
       ignorarEventosInternos = true;
       try {
-        await verificarEAtualizarServidor(rootDir, config);
-
         const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
         const { notificarRecarregamento } = require("./livereload");
 
         executarHooksOpcionais(rootDir);
         gerarProjetoCompleto(rootDir, config.snapshotExtensions);
+        console.log(`📝 projeto_completo.txt salvo com sucesso.`);
+
+        const resUpdate = await verificarEAtualizarServidor(rootDir, config);
+        if (resUpdate.status === "up-to-date") {
+          console.log(`${CINZA}📦 Pacote @nicolasarths/devserver up to date (v${resUpdate.versaoLocal}).${RESET}`);
+        } else if (resUpdate.status === "updated") {
+          console.log(`🔄 Pacote @nicolasarths/devserver atualizado para v${resUpdate.versaoRemota} com sucesso!`);
+        } else if (resUpdate.status === "cooldown") {
+          console.log(`${CINZA}📦 Pacote @nicolasarths/devserver up to date (v${resUpdate.versaoLocal} • cache 60s).${RESET}`);
+        } else if (resUpdate.status === "error") {
+          console.log(`⚠️  Falha ao verificar atualização do pacote: ${resUpdate.erro}`);
+        }
+
         notificarRecarregamento();
       } finally {
         setTimeout(() => {

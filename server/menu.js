@@ -1,6 +1,6 @@
 /**
  * Menu Interativo do Terminal
- * Responsabilidade: Exibir o modo detectado automaticamente (Pacote NPM vs Projeto Web/GitHub) e rotear opções do usuário.
+ * Responsabilidade: Exibir dica formatada em linha única no boot, renderizar o menu com descrições em cinza médio sob demanda (/menu) e rotear ações.
  */
 const readline = require("readline");
 const { salvarConfig, detectarGitRemote } = require("./config");
@@ -10,37 +10,50 @@ const { publicarAtualizacao } = require("./deploy");
 
 const MENSAGEM_PADRAO = "Update sem descrição";
 
+// Códigos ANSI para formatação visual no terminal
+const NEGRITO = "\x1b[1m";
+const ITALICO = "\x1b[3m";
+const CINZA = "\x1b[90m";
+const CIANO = "\x1b[36m";
+const RESET = "\x1b[0m";
+
+function exibirDicaMenu() {
+  console.log(
+    `💡 ${NEGRITO}${CIANO}/menu${RESET} para opções | ` +
+    `${NEGRITO}${CIANO}Mensagem de Commit + Enter${RESET} para salvar no Github | ` +
+    `${NEGRITO}${CIANO}Somente Enter${RESET} commitar ${ITALICO}${CINZA}"${MENSAGEM_PADRAO}"${RESET}.\n`
+  );
+}
+
 function exibirMenu(rootDir, config) {
   const remote = detectarGitRemote(rootDir);
   const statusGit = remote
-    ? `${remote.githubUser}/${remote.repoName} (branch: ${config.branch || "main"})`
-    : "Não vinculado (escolha [2] para configurar)";
+    ? `${remote.githubUser}/${remote.repoName} (${config.branch || "main"})`
+    : "Não vinculado (digite 2 para configurar)";
 
   const modoDetectado = config.isNpmPackage
-    ? `📦 Pacote NPM (${config.packageName}) ➔ GitHub + Auto-Publish NPM`
-    : `🌐 Projeto Web/GitHub ➔ GitHub + Monitor GitHub Pages`;
+    ? `NPM (${config.packageName}) ➔ GitHub + NPM`
+    : `Web ➔ GitHub + Pages`;
 
   console.log(`\n--------------------------------------------------`);
-  console.log(`🔍 Modo:   ${modoDetectado}`);
-  console.log(`🐙 GitHub: ${statusGit}`);
+  console.log(`🔍 ${modoDetectado}`);
+  console.log(`🐙 ${statusGit}`);
   console.log(`--------------------------------------------------`);
-  console.log(`📋 O QUE VOCÊ DESEJA FAZER?`);
-  console.log(`  [1] 🚀 Publicar alteração (pedir mensagem de commit)`);
-  console.log(`  [2] 🐙 Configurar / Criar repositório no GitHub`);
-  console.log(`  [3] ⚙️  Configurar porta, branch ou projeto`);
-  console.log(`  [4] 📊 Ver status detalhado`);
-  console.log(`  [5] 🧹 Limpar tela`);
-  console.log(`  [0] ❌ Sair e encerrar servidor`);
-  console.log(`  💡 Atalho: digite a mensagem e dê ENTER (ou só ENTER para "${MENSAGEM_PADRAO}")`);
+  console.log(`  [1] 🚀 Novo commit          ${CINZA}(faz add, commit e push/publish agora)${RESET}`);
+  console.log(`  [2] 🐙 Repositório GitHub   ${CINZA}(cria novo repo ou vincula URL existente)${RESET}`);
+  console.log(`  [3] ⚙️  Configurar projeto   ${CINZA}(altera porta HTTP, branch ou nome do repo)${RESET}`);
+  console.log(`  [4] 📊 Ver status           ${CINZA}(mostra pasta raiz, modo, porta e remote)${RESET}`);
+  console.log(`  [5] 🧹 Limpar tela          ${CINZA}(limpa o histórico visual do terminal)${RESET}`);
+  console.log(`  [0] ❌ Sair                 ${CINZA}(encerra o servidor e o monitoramento)${RESET}`);
   console.log(`--------------------------------------------------`);
 }
 
 async function configurarOpcoesProjeto(rl, rootDir, config) {
-  console.log(`\n⚙️ CONFIGURAÇÕES DO PROJETO (${config.projectName})`);
-  const porta = await perguntar(rl, `🔌 Porta HTTP [${config.port || 8081}]: `);
-  const branch = await perguntar(rl, `🌿 Branch principal [${config.branch || "main"}]: `);
+  console.log(`\n⚙️ CONFIGURAÇÕES (${config.projectName})`);
+  const porta = await perguntar(rl, `🔌 Porta [${config.port || 8081}]: `);
+  const branch = await perguntar(rl, `🌿 Branch [${config.branch || "main"}]: `);
   const user = await perguntar(rl, `👤 Usuário GitHub [${config.githubUser}]: `);
-  const repo = await perguntar(rl, `📦 Nome do repositório [${config.repoName}]: `);
+  const repo = await perguntar(rl, `📦 Repositório [${config.repoName}]: `);
 
   const novaConfig = {
     ...config,
@@ -51,7 +64,7 @@ async function configurarOpcoesProjeto(rl, rootDir, config) {
   };
 
   salvarConfig(rootDir, novaConfig);
-  console.log(`✅ Configurações salvas em .devserver.json! (Se mudou a porta, reinicie o servidor).`);
+  console.log(`✅ Salvo em .devserver.json! (Reinicie se alterou a porta).`);
   return novaConfig;
 }
 
@@ -71,7 +84,7 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
     ocupado = false;
   }
 
-  exibirMenu(rootDir, configAtual);
+  exibirDicaMenu();
 
   rl.on("line", async (linha) => {
     if (ocupado) return;
@@ -80,55 +93,56 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
 
     ocupado = true;
     try {
+      if (entrada === "/menu" || entrada.toLowerCase() === "menu") {
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
       if (entrada === "0") {
-        console.log("\n👋 Encerrando servidor...");
+        console.log("\n👋 Servidor encerrado.");
         process.exit(0);
       }
 
       if (entrada === "1") {
-        const msg = await perguntar(rl, `\n📝 Digite a mensagem do commit [${MENSAGEM_PADRAO}]: `);
+        const msg = await perguntar(rl, `\n📝 Mensagem [${MENSAGEM_PADRAO}]: `);
         configAtual = await publicarAtualizacao(rl, msg || MENSAGEM_PADRAO, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "2") {
         configAtual = await executarAssistenteGitHub(rl, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "3") {
         configAtual = await configurarOpcoesProjeto(rl, rootDir, configAtual);
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "4") {
         const remote = detectarGitRemote(rootDir);
-        console.log(`\n📊 STATUS DETALHADO:`);
-        console.log(`   • Pasta Raiz:     ${rootDir}`);
-        console.log(`   • Projeto:        ${configAtual.projectName}`);
-        console.log(`   • Tipo Detectado: ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
-        console.log(`   • Porta Config:   ${configAtual.port}`);
-        console.log(`   • Usuário GitHub: ${configAtual.githubUser || "(não definido)"}`);
-        console.log(`   • Repositório:    ${configAtual.repoName || "(não definido)"}`);
-        console.log(`   • Remote Origin:  ${remote ? remote.remoteUrl : "(não vinculado)"}`);
-        console.log(`   • Branch:         ${configAtual.branch || "main"}`);
-        exibirMenu(rootDir, configAtual);
+        console.log(`\n📊 STATUS:`);
+        console.log(`   • Raiz:   ${rootDir}`);
+        console.log(`   • Modo:   ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
+        console.log(`   • Porta:  ${configAtual.port}`);
+        console.log(`   • Remote: ${remote ? remote.remoteUrl : "(não vinculado)"}`);
+        console.log(`   • Branch: ${configAtual.branch || "main"}`);
+        exibirDicaMenu();
         return;
       }
 
       if (entrada === "5") {
         console.clear();
-        exibirMenu(rootDir, configAtual);
+        exibirDicaMenu();
         return;
       }
 
-      // Se apertar apenas ENTER (vazio) ou digitar texto livre, publica direto!
       const mensagemFinal = entrada || MENSAGEM_PADRAO;
       configAtual = await publicarAtualizacao(rl, mensagemFinal, rootDir, configAtual);
-      exibirMenu(rootDir, configAtual);
+      exibirDicaMenu();
     } finally {
       ocupado = false;
     }

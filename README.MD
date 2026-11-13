@@ -34,6 +34,7 @@ nic-dev
 
 * **`ENTER` vazio** — executa `git add .`, `commit` (`"Update sem descrição"`) e `push` (e publica no NPM se for pacote).
 * **`<mensagem> + ENTER`** — publica usando a sua mensagem de commit.
+* **`/menu`** — exibe novamente o menu completo de opções do servidor.
 * **`[2]`** — abre o assistente para criar um repositório no GitHub, ativar GitHub Pages e salvar suas credenciais globalmente no sistema.
 * **`[3]`** — ajusta porta HTTP, branch principal ou nome do repositório.
 * **`[0]`** — encerra o servidor.
@@ -47,7 +48,7 @@ Para quem deseja inspecionar o código-fonte e verificar que não há dependênc
 * **`http.js` e `livereload.js`** — Servem arquivos estáticos localmente e injetam um `<script>` de `EventSource` (`/livereload`) nos HTMLs para recarregar a página ao salvar.
 * **`watcher.js` e `builder.js`** — Monitoram alterações em tempo real e concatenam os arquivos de texto válidos em `projeto_completo.txt`.
 * **`auto-updater.js`** — Consulta a API pública do registro NPM (`registry.npmjs.org`) com trava de 60s e extrai o tarball oficial caso exista versão superior.
-* **`deploy.js` e `github/`** — Automação local de comandos `git` e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
+* **`deploy.js`, `logger.js` e `github/`** — Automação silenciosa de comandos `git`, resumos limpos de deploy e chamadas REST diretas para `api.github.com` (usando apenas o token informado pelo próprio usuário).
 
 ## 📄 Licença
 

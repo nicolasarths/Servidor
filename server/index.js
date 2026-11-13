@@ -2,7 +2,7 @@
 
 /**
  * Ponto de Entrada do Universal Dev Server
- * Responsabilidade: Iniciar build, watcher, servidor HTTP sem duplicação de listeners e menu interativo na pasta atual.
+ * Responsabilidade: Iniciar build inicial silencioso, watcher, servidor HTTP em HUD compacto de linha única e menu interativo.
  */
 const { carregarConfig } = require("./config");
 const { criarServidorHttp } = require("./http");
@@ -13,7 +13,7 @@ const { iniciarMenuInterativo } = require("./menu");
 const ROOT_DIR = process.cwd();
 const config = carregarConfig(ROOT_DIR);
 
-// 1. Executa hooks e gera projeto_completo.txt na inicialização
+// 1. Executa hooks e gera projeto_completo.txt silenciosamente na inicialização
 executarHooksOpcionais(ROOT_DIR);
 gerarProjetoCompleto(ROOT_DIR, config.snapshotExtensions);
 
@@ -36,11 +36,7 @@ function iniciarEscuta(portaAtual) {
 
   const onListening = () => {
     server.removeListener("error", onError);
-    console.log(`\n==================================================`);
-    console.log(`⚡ Dev Server [${config.projectName}] rodando em:`);
-    console.log(`   👉 http://localhost:${portaAtual}`);
-    console.log(`📝 projeto_completo.txt sincronizado.`);
-    console.log(`==================================================`);
+    console.log(`\n⚡ Dev Server [${config.projectName}] rodando em: 👉 http://localhost:${portaAtual}`);
 
     iniciarMenuInterativo(ROOT_DIR, config);
   };
