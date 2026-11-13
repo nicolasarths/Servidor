@@ -1,0 +1,1248 @@
+=== ARQUIVO: \server\builder.js ===
+/**
+ * Gerador de Snapshot e Hooks de Build
+ * Responsabilidade: Apagar o snapshot anterior, gerar projeto_completo.txt limpo na raiz do projeto e executar hooks opcionais.
+ */
+const fs = require("fs");
+const path = require("path");
+
+let isGenerating = false;
+
+function executarHooksOpcionais(rootDir) {
+  const painelDir = path.join(rootDir, "painel");
+  const modulosPath = path.join(rootDir, "modulos.json");
+
+  if (!fs.existsSync(painelDir) || !fs.existsSync(modulosPath)) return;
+
+  const estrutura = {};
+  const itens = fs.readdirSync(painelDir, { withFileTypes: true });
+
+  itens.filter((i) => i.isDirectory()).forEach((pasta) => {
+    const nomePasta = pasta.name;
+    const caminhoPasta = path.join(painelDir, nomePasta);
+    const arquivos = fs.readdirSync(caminhoPasta);
+
+    estrutura[nomePasta] = {
+      temCustomJS: arquivos.includes("module.js"),
+      registros: []
+    };
+
+    arquivos.filter((f) => f.endsWith(".json")).forEach((arq) => {
+      try {
+        const conteudo = JSON.parse(fs.readFileSync(path.join(caminhoPasta, arq), "utf-8"));
+        if (Array.isArray(conteudo)) {
+          conteudo.forEach((item, idx) => {
+            if (!item.id) item.id = `${nomePasta}-${arq.replace(".json", "")}-${idx}`;
+            estrutura[nomePasta].registros.push(item);
+          });
+        } else if (typeof conteudo === "object" && conteudo !== null) {
+          conteudo.id = conteudo.id || `${nomePasta}-${arq.replace(".json", "")}`;
+          estrutura[nomePasta].registros.push(conteudo);
+        }
+      } catch (_) {}
+    });
+  });
+
+  fs.writeFileSync(modulosPath, JSON.stringify(estrutura, null, 2), { encoding: "utf-8", flag: "w" });
+}
+
+function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css", ".json"]) {
+  if (isGenerating) return;
+  isGenerating = true;
+
+  try {
+    const destino = path.join(rootDir, "projeto_completo.txt");
+
+    // Apaga fisicamente o snapshot anterior antes de gerar o novo
+    if (fs.existsSync(destino)) {
+      fs.unlinkSync(destino);
+    }
+
+    let output = "";
+
+    const ignorarNomes = new Set([
+      ".git",
+      "node_modules",
+      "dist",
+      "build",
+      ".next",
+      ".vscode",
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      ".devserver.json",
+      "server.config.json"
+    ]);
+
+    function varrerDiretorio(dir) {
+      const itens = fs.readdirSync(dir, { withFileTypes: true });
+      for (const item of itens) {
+        const nomeLower = item.name.toLowerCase();
+
+        if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo")) {
+          continue;
+        }
+
+        const fullPath = path.join(dir, item.name);
+        if (item.isDirectory()) {
+          varrerDiretorio(fullPath);
+        } else if (item.isFile()) {
+          const ext = path.extname(item.name).toLowerCase();
+          if (extensoesValidas.includes(ext)) {
+            const relPath = "\\" + path.relative(rootDir, fullPath);
+            const content = fs.readFileSync(fullPath, "utf-8");
+            output += `=== ARQUIVO: ${relPath} ===\n${content}\n\n`;
+          }
+        }
+      }
+    }
+
+    varrerDiretorio(rootDir);
+    fs.writeFileSync(destino, output, { encoding: "utf-8", flag: "w" });
+  } catch (err) {
+    console.error("❌ [Builder] Erro ao gerar projeto_completo.txt:", err.message);
+  } finally {
+    isGenerating = false;
+  }
+}
+
+module.exports = {
+  executarHooksOpcionais,
+  gerarProjetoCompleto
+};
+
+=== ARQUIVO: \server\config.js ===
+/**
+ * Gerenciador de Configuração por Projeto
+ * Responsabilidade: Detectar metadados do projeto via process.cwd() (incluindo auto-detecção de pacote NPM próprio)
+ * e persistir ajustes em .devserver.json na raiz do projeto sem intervenção manual.
+ */
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
+
+const CONFIG_FILENAME = ".devserver.json";
+
+function detectarGitRemote(rootDir) {
+  try {
+    const url = execSync("git remote get-url origin", {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+      .toString()
+      .trim();
+
+    const match = url.match(/github\.com[:/]([^/]+)\/([^/.]+)(\.git)?$/i);
+    if (match) {
+      return {
+        githubUser: match[1],
+        repoName: match[2],
+        remoteUrl: url
+      };
+    }
+  } catch (_) {}
+  return null;
+}
+
+function localizarPastaPacoteNpm(rootDir) {
+  const candidatos = [rootDir, path.join(rootDir, "server")];
+  for (const dir of candidatos) {
+    const pkgPath = path.join(dir, "package.json");
+    if (!fs.existsSync(pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      if (pkg.name === "@nicolasarths/devserver" || Boolean(pkg.bin && pkg.publishConfig?.access === "public")) {
+        return dir;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function carregarConfig(rootDir) {
+  const configPath = path.join(rootDir, CONFIG_FILENAME);
+  const nomePastaRaiz = path.basename(rootDir);
+  const gitInfo = detectarGitRemote(rootDir);
+  const npmPackageDir = localizarPastaPacoteNpm(rootDir);
+
+  const padrao = {
+    projectName: nomePastaRaiz,
+    port: 8081,
+    githubUser: gitInfo?.githubUser || "",
+    repoName: gitInfo?.repoName || nomePastaRaiz,
+    branch: "main",
+    autoNpmPublish: Boolean(npmPackageDir),
+    npmPackageDir: npmPackageDir || "",
+    pagesCheckFile: fs.existsSync(path.join(rootDir, "manifest.json")) ? "manifest.json" : "index.html",
+    snapshotExtensions: [".js", ".html", ".css", ".json", ".ts", ".jsx", ".tsx", ".md"]
+  };
+
+  if (fs.existsSync(configPath)) {
+    try {
+      const salvo = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      return {
+        ...padrao,
+        ...salvo,
+        // Sempre mantém o caminho real do pacote atualizado se detectado
+        npmPackageDir: npmPackageDir || salvo.npmPackageDir || ""
+      };
+    } catch (_) {}
+  }
+
+  salvarConfig(rootDir, padrao);
+  return padrao;
+}
+
+function salvarConfig(rootDir, novaConfig) {
+  const configPath = path.join(rootDir, CONFIG_FILENAME);
+  fs.writeFileSync(configPath, JSON.stringify(novaConfig, null, 2), "utf-8");
+}
+
+module.exports = {
+  CONFIG_FILENAME,
+  carregarConfig,
+  salvarConfig,
+  detectarGitRemote,
+  localizarPastaPacoteNpm
+};
+
+=== ARQUIVO: \server\deploy.js ===
+/**
+ * Motor de Deploy, NPM Auto-Publish e Monitoramento do GitHub Pages
+ * Responsabilidade: Garantir configuração GitHub automaticamente se ausente, versionar, publicar no Git/NPM e monitorar Pages.
+ */
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
+const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
+const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
+const { detectarGitRemote, localizarPastaPacoteNpm } = require("./config");
+
+async function aguardarDeployGitHubPages(versaoAlvo, config) {
+  if (!config.githubUser || !config.repoName || config.autoNpmPublish) return;
+
+  const checkFile = config.pagesCheckFile || "index.html";
+  const urlBase = `https://${config.githubUser}.github.io/${config.repoName}`;
+  const targetUrl = `${urlBase}/${checkFile}`;
+
+  console.log(`\n==================================================`);
+  console.log(`📡 [Monitor Pages] Acompanhando build no GitHub...`);
+  console.log(`🌐 URL: ${urlBase}/`);
+  if (checkFile === "manifest.json") {
+    console.log(`🎯 Aguardando versão remota: v${versaoAlvo}`);
+  }
+  console.log(`==================================================\n`);
+
+  const intervaloMs = 5000;
+  const maxTentativas = 48;
+  let tentativas = 0;
+  const inicio = Date.now();
+
+  const timer = setInterval(async () => {
+    tentativas++;
+    const decorridoSegundos = Math.round((Date.now() - inicio) / 1000);
+
+    try {
+      const url = `${targetUrl}?_nocache=${Date.now()}`;
+      const res = await fetch(url, {
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache"
+        }
+      });
+
+      if (res.ok) {
+        if (checkFile === "manifest.json") {
+          const json = await res.json().catch(() => ({}));
+          if (json.version === versaoAlvo) {
+            clearInterval(timer);
+            try { process.stdout.write("\x07"); } catch (_) {}
+            console.log(`\n🎉 [GITHUB PAGES NO AR!] v${versaoAlvo} publicada em ${decorridoSegundos}s!\n`);
+            return;
+          }
+        } else {
+          const html = await res.text();
+          if (html.includes(versaoAlvo) || tentativas >= 4) {
+            clearInterval(timer);
+            try { process.stdout.write("\x07"); } catch (_) {}
+            console.log(`\n🎉 [GITHUB PAGES NO AR!] Atualização publicada em ${decorridoSegundos}s!\n`);
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    console.log(`⏳ [${decorridoSegundos}s] GitHub Actions compilando...`);
+
+    if (tentativas >= maxTentativas) {
+      clearInterval(timer);
+      console.log(`\n⚠️ Tempo limite de monitorização excedido (4 min).`);
+      console.log(`Verifique em: https://github.com/${config.githubUser}/${config.repoName}/actions\n`);
+    }
+  }, intervaloMs);
+}
+
+function incrementarVersaoPacoteNpm(pkgDir) {
+  const pkgPath = path.join(pkgDir, "package.json");
+  if (!fs.existsSync(pkgPath)) return null;
+
+  try {
+    execSync("npm version patch --no-git-tag-version", { cwd: pkgDir, stdio: "ignore" });
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    console.log(`📦 [NPM] Versão do pacote incrementada para: ${pkg.version}`);
+    return pkg.version;
+  } catch (err) {
+    console.error(`⚠️ Não foi possível incrementar versão no package.json:`, err.message);
+    return null;
+  }
+}
+
+function publicarNoNpm(pkgDir, versao) {
+  try {
+    console.log(`🚀 [NPM] Publicando v${versao} no registro do npm...`);
+    execSync("npm publish --access public", { cwd: pkgDir, stdio: "inherit" });
+    console.log(`🎉 [NPM PUBLICADO!] v${versao} já está disponível via npx!\n`);
+  } catch (err) {
+    console.error(`❌ Falha ao publicar no npm:`, err.message);
+  }
+}
+
+async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
+  let configAtual = config;
+  let remote = detectarGitRemote(rootDir);
+
+  // Se ainda não há repositório vinculado, abre o assistente imediatamente e continua o deploy depois!
+  if (!remote) {
+    console.log(`\n⚠️ Nenhum repositório remoto configurado neste projeto ainda!`);
+    console.log(`🔧 Iniciando configuração automática do GitHub antes de publicar "${mensagemCommit}"...\n`);
+    configAtual = await executarAssistenteGitHub(rl, rootDir, configAtual);
+    remote = detectarGitRemote(rootDir);
+
+    if (!remote) {
+      console.log(`❌ Publicação interrompida porque nenhum repositório foi vinculado.\n`);
+      return configAtual;
+    }
+  }
+
+  await garantirIdentidadeGit(rl, rootDir);
+
+  const agora = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const timestampVersao = `${agora.getFullYear()}.${agora.getMonth() + 1}.${agora.getDate()}-${pad(agora.getHours())}${pad(agora.getMinutes())}`;
+
+  console.log(`\n📦 [Deploy ${configAtual.projectName}] Publicando: "${mensagemCommit}"`);
+  console.log(`🏷️ Versão gerada: v${timestampVersao}`);
+
+  let versaoNpm = null;
+  const pkgDir = configAtual.npmPackageDir || localizarPastaPacoteNpm(rootDir) || rootDir;
+  if (configAtual.autoNpmPublish) {
+    versaoNpm = incrementarVersaoPacoteNpm(pkgDir);
+  }
+
+  const indexPath = path.join(rootDir, "index.html");
+  if (fs.existsSync(indexPath)) {
+    let indexHtml = fs.readFileSync(indexPath, "utf-8");
+    const atualizado = indexHtml.replace(
+      /(src=["']\.\/[^"']+\.js)(\?v=[^"'\s>]+)?(["'])/g,
+      `$1?v=${timestampVersao}$3`
+    );
+    if (atualizado !== indexHtml) {
+      fs.writeFileSync(indexPath, atualizado, "utf-8");
+      console.log(`✅ Scripts locais do index.html versionados com ?v=${timestampVersao}`);
+    }
+  }
+
+  const manifestPath = path.join(rootDir, "manifest.json");
+  if (fs.existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+      manifest.version = timestampVersao;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+      console.log(`✅ manifest.json atualizado para ${timestampVersao}`);
+    } catch (_) {}
+  }
+
+  executarHooksOpcionais(rootDir);
+  gerarProjetoCompleto(rootDir, configAtual.snapshotExtensions);
+
+  try {
+    const branch = configAtual.branch || "main";
+    execSync("git add .", { stdio: "inherit", cwd: rootDir });
+
+    // Verifica se há alterações pendentes para commitar (caso o assistente já tenha feito o initial commit)
+    const statusPorcelain = execSync("git status --porcelain", { cwd: rootDir }).toString().trim();
+    if (!statusPorcelain) {
+      console.log(`ℹ️ Nenhuma alteração nova pendente após o setup inicial.`);
+      if (configAtual.autoNpmPublish && versaoNpm) {
+        publicarNoNpm(pkgDir, versaoNpm);
+      }
+      return configAtual;
+    }
+
+    const tagMsg = versaoNpm ? `v${versaoNpm}` : `v${timestampVersao}`;
+    const commitMsgFormatada = `${tagMsg}: ${mensagemCommit}`;
+    execSync(`git commit -m "${commitMsgFormatada.replace(/"/g, '\\"')}"`, { stdio: "inherit", cwd: rootDir });
+
+    console.log(`🚀 Enviando para origin/${branch}...`);
+    execSync(`git push -u origin ${branch}`, { stdio: "inherit", cwd: rootDir });
+
+    console.log(`✅ Push no GitHub concluído com sucesso!`);
+
+    if (configAtual.autoNpmPublish && versaoNpm) {
+      publicarNoNpm(pkgDir, versaoNpm);
+    } else {
+      aguardarDeployGitHubPages(timestampVersao, configAtual);
+    }
+  } catch (err) {
+    console.error(`\n❌ Falha durante o deploy:`, err.message);
+  }
+
+  return configAtual;
+}
+
+module.exports = { publicarAtualizacao };
+
+=== ARQUIVO: \server\github\git-identity.js ===
+/**
+ * Gerenciador de Identidade Global do Git
+ * Responsabilidade: Verificar se user.name e user.email existem no sistema e configurá-los automaticamente,
+ * garantindo que o diretório HOME exista no Windows antes de gravar o .gitconfig.
+ */
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execSync } = require("child_process");
+const { perguntar } = require("./prompts");
+
+function prepararAmbienteGit() {
+  const homeAtual = process.env.HOME || os.homedir();
+  if (homeAtual && !fs.existsSync(homeAtual)) {
+    try {
+      fs.mkdirSync(homeAtual, { recursive: true });
+    } catch (_) {
+      // Se o OneDrive bloquear criação da pasta HOME customizada, usa o perfil real do Windows
+      process.env.HOME = os.homedir();
+    }
+  }
+}
+
+function lerConfigGit(chave, cwd) {
+  prepararAmbienteGit();
+  try {
+    return execSync(`git config --global ${chave}`, {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"]
+    })
+      .toString()
+      .trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function gravarConfigGit(chave, valor, cwd) {
+  prepararAmbienteGit();
+  const seguro = valor.replace(/"/g, '\\"');
+  try {
+    execSync(`git config --global ${chave} "${seguro}"`, { cwd, stdio: "ignore" });
+  } catch (_) {
+    // Fallback direto para o perfil real do usuário no Windows caso HOME esteja corrompido
+    const realHome = os.homedir();
+    execSync(`git config --file "${path.join(realHome, ".gitconfig")}" ${chave} "${seguro}"`, {
+      cwd,
+      stdio: "ignore"
+    });
+  }
+}
+
+async function garantirIdentidadeGit(rl, rootDir) {
+  const nomeAtual = lerConfigGit("user.name", rootDir);
+  const emailAtual = lerConfigGit("user.email", rootDir);
+
+  if (nomeAtual && emailAtual) {
+    return { nome: nomeAtual, email: emailAtual };
+  }
+
+  console.log(`\n⚠️ Identidade do Git não configurada neste computador.`);
+  console.log(`   Vamos configurar agora (ficará salvo globalmente para todos os seus projetos):\n`);
+
+  let nomeFinal = nomeAtual;
+  if (!nomeFinal) {
+    const respNome = await perguntar(rl, `👤 Seu Nome para commits [Nicolas Arths]: `);
+    nomeFinal = respNome || "Nicolas Arths";
+    gravarConfigGit("user.name", nomeFinal, rootDir);
+  }
+
+  let emailFinal = emailAtual;
+  if (!emailFinal) {
+    const respEmail = await perguntar(rl, `📧 Seu E-mail do GitHub [nicolasarths@hotmail.com]: `);
+    emailFinal = respEmail || "nicolasarths@hotmail.com";
+    gravarConfigGit("user.email", emailFinal, rootDir);
+  }
+
+  console.log(`✅ Identidade salva globalmente: ${nomeFinal} <${emailFinal}>\n`);
+  return { nome: nomeFinal, email: emailFinal };
+}
+
+module.exports = {
+  lerConfigGit,
+  garantirIdentidadeGit
+};
+
+=== ARQUIVO: \server\github\git-local.js ===
+/**
+ * Operações Locais do Git
+ * Responsabilidade: Inicializar repositório local, gerenciar .gitignore, branch e remote origin.
+ */
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
+
+function garantirGitIgnore(rootDir) {
+  const gitignorePath = path.join(rootDir, ".gitignore");
+  const regrasEssenciais = [
+    "node_modules/",
+    ".DS_Store",
+    "Thumbs.db",
+    ".devserver.json"
+  ];
+
+  let conteudoAtual = fs.existsSync(gitignorePath)
+    ? fs.readFileSync(gitignorePath, "utf-8")
+    : "";
+
+  let alterado = false;
+  for (const regra of regrasEssenciais) {
+    if (!conteudoAtual.includes(regra)) {
+      conteudoAtual += (conteudoAtual.endsWith("\n") || conteudoAtual === "" ? "" : "\n") + regra + "\n";
+      alterado = true;
+    }
+  }
+
+  if (alterado) {
+    fs.writeFileSync(gitignorePath, conteudoAtual, "utf-8");
+    console.log("✅ .gitignore verificado/atualizado.");
+  }
+}
+
+function garantirGitLocal(rootDir, branch = "main") {
+  if (!fs.existsSync(path.join(rootDir, ".git"))) {
+    execSync("git init", { cwd: rootDir, stdio: "inherit" });
+    console.log("✅ Repositório Git local inicializado.");
+  }
+  try {
+    execSync(`git branch -M ${branch}`, { cwd: rootDir, stdio: "ignore" });
+  } catch (_) {}
+}
+
+function configurarOrigin(rootDir, remoteUrl) {
+  try {
+    execSync("git remote get-url origin", { cwd: rootDir, stdio: "ignore" });
+    execSync(`git remote set-url origin "${remoteUrl}"`, { cwd: rootDir, stdio: "inherit" });
+  } catch (_) {
+    execSync(`git remote add origin "${remoteUrl}"`, { cwd: rootDir, stdio: "inherit" });
+  }
+  console.log(`✅ Remote 'origin' configurado para: ${remoteUrl}`);
+}
+
+module.exports = {
+  garantirGitIgnore,
+  garantirGitLocal,
+  configurarOrigin
+};
+
+=== ARQUIVO: \server\github\github-api.js ===
+/**
+ * Cliente da API REST do GitHub
+ * Responsabilidade: Criar repositórios remotos e ativar GitHub Pages via fetch nativo.
+ */
+
+async function criarRepositorioRemotoGitHub({ token, repoName, descricao, privado }) {
+  const userRes = await fetch("https://api.github.com/user", {
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "Universal-Dev-Server"
+    }
+  });
+
+  if (!userRes.ok) {
+    const err = await userRes.json().catch(() => ({}));
+    throw new Error(`Token inválido ou sem permissão: ${err.message || userRes.status}`);
+  }
+
+  const userData = await userRes.json();
+  const githubUser = userData.login;
+
+  const createRes = await fetch("https://api.github.com/user/repos", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept": "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "User-Agent": "Universal-Dev-Server"
+    },
+    body: JSON.stringify({
+      name: repoName,
+      description: descricao || `Projeto ${repoName}`,
+      private: privado,
+      auto_init: false
+    })
+  });
+
+  const repoData = await createRes.json().catch(() => ({}));
+  if (!createRes.ok) {
+    throw new Error(`Erro ao criar repositório: ${repoData.message || createRes.status}`);
+  }
+
+  console.log(`🎉 Repositório criado com sucesso: ${repoData.html_url}`);
+
+  return {
+    githubUser,
+    repoName: repoData.name,
+    cloneUrl: repoData.clone_url,
+    htmlUrl: repoData.html_url
+  };
+}
+
+async function ativarGitHubPages({ token, githubUser, repoName, branch = "main" }) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${githubUser}/${repoName}/pages`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "User-Agent": "Universal-Dev-Server"
+      },
+      body: JSON.stringify({
+        source: {
+          branch,
+          path: "/"
+        }
+      })
+    });
+
+    if (res.ok || res.status === 201 || res.status === 409) {
+      console.log(`🌐 GitHub Pages ativado em: https://${githubUser}.github.io/${repoName}/`);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      console.log(`⚠️ Pages não ativado automaticamente (${err.message || res.status}). Ative nas configurações do repo após o push.`);
+    }
+  } catch (err) {
+    console.log(`⚠️ Erro ao configurar GitHub Pages: ${err.message}`);
+  }
+}
+
+module.exports = {
+  criarRepositorioRemotoGitHub,
+  ativarGitHubPages
+};
+
+=== ARQUIVO: \server\github\index.js ===
+/**
+ * Orquestrador do Assistente GitHub
+ * Responsabilidade: Conduzir o menu interativo de criação/vinculação de repositório e persistir o token globalmente no Windows.
+ */
+const path = require("path");
+const { execSync } = require("child_process");
+const { salvarConfig, detectarGitRemote } = require("../config");
+const { perguntar } = require("./prompts");
+const { garantirIdentidadeGit } = require("./git-identity");
+const { garantirGitIgnore, garantirGitLocal, configurarOrigin } = require("./git-local");
+const { criarRepositorioRemotoGitHub, ativarGitHubPages } = require("./github-api");
+
+function lerTokenGlobalWindows() {
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+  try {
+    const out = execSync('reg query "HKCU\\Environment" /v GITHUB_TOKEN', {
+      stdio: ["ignore", "pipe", "ignore"]
+    }).toString();
+    const match = out.match(/GITHUB_TOKEN\s+REG_SZ\s+(\S+)/);
+    if (match) {
+      process.env.GITHUB_TOKEN = match[1];
+      return match[1];
+    }
+  } catch (_) {}
+  return "";
+}
+
+function salvarTokenGlobalWindows(token) {
+  process.env.GITHUB_TOKEN = token;
+  try {
+    execSync(`setx GITHUB_TOKEN "${token}"`, { stdio: "ignore" });
+    console.log("✅ Token salvo globalmente no Windows (nunca mais será pedido em nenhum projeto!).");
+  } catch (err) {
+    console.log(`⚠️ Não foi possível gravar no registro do Windows: ${err.message}`);
+  }
+}
+
+async function executarAssistenteGitHub(rl, rootDir, config) {
+  console.log(`\n==================================================`);
+  console.log(`🐙 ASSISTENTE DE CONFIGURAÇÃO GITHUB`);
+  console.log(`==================================================`);
+
+  const existente = detectarGitRemote(rootDir);
+  if (existente) {
+    console.log(`ℹ️ Remote atual detectado: ${existente.remoteUrl}`);
+  }
+
+  console.log(`\nEscolha uma opção:`);
+  console.log(`  [1] Criar um NOVO repositório no GitHub agora`);
+  console.log(`  [2] Vincular um repositório JÁ EXISTENTE (via URL)`);
+  console.log(`  [3] Atualizar nome/usuário/branch na configuração local`);
+  console.log(`  [0] Cancelar\n`);
+
+  const opcao = await perguntar(rl, "👉 Opção: ");
+
+  if (opcao === "0" || !opcao) {
+    console.log("Operação cancelada.\n");
+    return config;
+  }
+
+  garantirGitIgnore(rootDir);
+  garantirGitLocal(rootDir, config.branch || "main");
+  await garantirIdentidadeGit(rl, rootDir);
+
+  if (opcao === "1") {
+    const nomeSugerido = config.repoName || path.basename(rootDir);
+    const repoInput = await perguntar(rl, `📦 Nome do repositório [${nomeSugerido}]: `);
+    const repoName = repoInput || nomeSugerido;
+
+    const desc = await perguntar(rl, `📝 Descrição (opcional): `);
+    const privInput = await perguntar(rl, `🔒 Repositório privado? (s/N): `);
+    const privado = privInput.toLowerCase() === "s";
+
+    const pagesInput = await perguntar(rl, `🌐 Ativar GitHub Pages automaticamente? (S/n): `);
+    const ativarPages = pagesInput.toLowerCase() !== "n";
+
+    let token = lerTokenGlobalWindows() || config.githubToken || "";
+    let tokenNovo = false;
+
+    if (!token) {
+      token = await perguntar(rl, `🔑 Cole seu GitHub Personal Access Token (scope 'repo'): `);
+      tokenNovo = Boolean(token);
+    }
+
+    if (!token) {
+      console.log("❌ Token não informado. Abortando criação.\n");
+      return config;
+    }
+
+    try {
+      console.log(`⏳ Criando repositório '${repoName}' no GitHub...`);
+      const criado = await criarRepositorioRemotoGitHub({
+        token,
+        repoName,
+        descricao: desc,
+        privado
+      });
+
+      if (tokenNovo) {
+        salvarTokenGlobalWindows(token);
+      }
+
+      configurarOrigin(rootDir, criado.cloneUrl);
+
+      const novaConfig = {
+        ...config,
+        githubUser: criado.githubUser,
+        repoName: criado.repoName
+      };
+      salvarConfig(rootDir, novaConfig);
+
+      const fazerPrimeiroPush = await perguntar(rl, `🚀 Deseja fazer o primeiro commit e push agora? (S/n): `);
+      if (fazerPrimeiroPush.toLowerCase() !== "n") {
+        execSync("git add .", { cwd: rootDir, stdio: "inherit" });
+        execSync(`git commit -m "chore: initial commit"`, { cwd: rootDir, stdio: "inherit" });
+        execSync(`git push -u origin ${novaConfig.branch || "main"}`, { cwd: rootDir, stdio: "inherit" });
+        console.log(`✅ Primeiro push concluído!`);
+
+        if (ativarPages) {
+          await ativarGitHubPages({
+            token,
+            githubUser: criado.githubUser,
+            repoName: criado.repoName,
+            branch: novaConfig.branch || "main"
+          });
+        }
+      }
+
+      console.log(`\n✨ Tudo pronto! A partir de agora, digite qualquer mensagem no terminal para publicar.\n`);
+      return novaConfig;
+    } catch (err) {
+      console.error(`\n❌ ${err.message}\n`);
+      return config;
+    }
+  }
+
+  if (opcao === "2") {
+    const url = await perguntar(rl, `🔗 Cole a URL do repositório (HTTPS ou SSH): `);
+    if (!url) {
+      console.log("❌ URL inválida.\n");
+      return config;
+    }
+
+    configurarOrigin(rootDir, url);
+    const info = detectarGitRemote(rootDir);
+
+    const novaConfig = {
+      ...config,
+      githubUser: info?.githubUser || config.githubUser,
+      repoName: info?.repoName || config.repoName
+    };
+    salvarConfig(rootDir, novaConfig);
+    console.log(`✅ Repositório vinculado! User: ${novaConfig.githubUser} | Repo: ${novaConfig.repoName}\n`);
+    return novaConfig;
+  }
+
+  if (opcao === "3") {
+    const user = await perguntar(rl, `👤 Usuário GitHub [${config.githubUser}]: `);
+    const repo = await perguntar(rl, `📦 Nome do Repo [${config.repoName}]: `);
+    const branch = await perguntar(rl, `🌿 Branch principal [${config.branch || "main"}]: `);
+    const port = await perguntar(rl, `🔌 Porta HTTP [${config.port || 8081}]: `);
+
+    const novaConfig = {
+      ...config,
+      githubUser: user || config.githubUser,
+      repoName: repo || config.repoName,
+      branch: branch || config.branch || "main",
+      port: Number(port) || config.port || 8081
+    };
+    salvarConfig(rootDir, novaConfig);
+    console.log(`✅ Configurações salvas em .devserver.json!\n`);
+    return novaConfig;
+  }
+
+  return config;
+}
+
+module.exports = {
+  executarAssistenteGitHub,
+  garantirIdentidadeGit
+};
+
+=== ARQUIVO: \server\github\prompts.js ===
+/**
+ * Utilitário de Entrada Interativa no Terminal
+ * Responsabilidade: Encapsular readline.question em Promises limpas.
+ */
+function perguntar(rl, texto) {
+  return new Promise((resolve) => {
+    rl.question(texto, (resposta) => resolve(resposta.trim()));
+  });
+}
+
+module.exports = { perguntar };
+
+=== ARQUIVO: \server\http.js ===
+/**
+ * Servidor HTTP Estático Genérico com Live Reload e CORS Aberto
+ * Responsabilidade: Servir arquivos do projeto, injetar script SSE em HTMLs e remover prefixo de sub-rota do GitHub Pages.
+ */
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const { adicionarCliente, removerCliente, SCRIPT_LIVE_RELOAD } = require("./livereload");
+
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf"
+};
+
+function criarServidorHttp({ rootDir, config }) {
+  return http.createServer((req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST, PUT, DELETE");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      return res.end();
+    }
+
+    const urlPath = req.url.split("?")[0];
+
+    // Endpoint de Live Reload
+    if (urlPath === "/livereload") {
+      adicionarCliente(res);
+      req.on("close", () => removerCliente(res));
+      return;
+    }
+
+    // Remove dinamicamente o prefixo do repositório (ex: /meu-projeto/index.html -> /index.html)
+    const repoPrefix = config.repoName ? `/${config.repoName}` : "";
+    let cleanPath = repoPrefix && urlPath.startsWith(repoPrefix)
+      ? urlPath.slice(repoPrefix.length)
+      : urlPath;
+
+    if (!cleanPath || cleanPath === "/") cleanPath = "/index.html";
+
+    // Se o projeto tiver manifest.json (ex: extensões), adiciona sufixo (DEV Local)
+    if (cleanPath === "/manifest.json") {
+      const manifestPath = path.join(rootDir, "manifest.json");
+      if (fs.existsSync(manifestPath)) {
+        try {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+          manifest.name = `${manifest.name || config.projectName} (DEV Local)`;
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          return res.end(JSON.stringify(manifest, null, 2));
+        } catch (_) {}
+      }
+    }
+
+    const filePath = path.join(rootDir, cleanPath);
+
+    // Previne Path Traversal fora da pasta raiz
+    if (!filePath.startsWith(rootDir)) {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+      return res.end("403 Forbidden");
+    }
+
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = mimeTypes[ext] || "application/octet-stream";
+
+      if (ext === ".html") {
+        let html = fs.readFileSync(filePath, "utf-8");
+        if (html.includes("</body>")) {
+          html = html.replace("</body>", SCRIPT_LIVE_RELOAD);
+        } else {
+          html += SCRIPT_LIVE_RELOAD;
+        }
+        res.writeHead(200, { "Content-Type": contentType });
+        return res.end(html);
+      }
+
+      res.writeHead(200, { "Content-Type": contentType });
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("404 Not Found");
+    }
+  });
+}
+
+module.exports = { criarServidorHttp };
+
+=== ARQUIVO: \server\index.js ===
+#!/usr/bin/env node
+
+/**
+ * Ponto de Entrada do Universal Dev Server
+ * Responsabilidade: Inicializar build, watcher, servidor HTTP com fallback de porta e menu interativo na pasta atual.
+ */
+const { carregarConfig } = require("./config");
+const { criarServidorHttp } = require("./http");
+const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
+const { iniciarWatcher } = require("./watcher");
+const { iniciarMenuInterativo } = require("./menu");
+
+const ROOT_DIR = process.cwd();
+const config = carregarConfig(ROOT_DIR);
+
+// 1. Executa hooks e gera projeto_completo.txt na inicialização
+executarHooksOpcionais(ROOT_DIR);
+gerarProjetoCompleto(ROOT_DIR, config.snapshotExtensions);
+
+// 2. Inicia o monitor de alterações em tempo real
+iniciarWatcher(ROOT_DIR, config);
+
+// 3. Sobe o servidor HTTP com incremento automático se a porta estiver ocupada
+const server = criarServidorHttp({ rootDir: ROOT_DIR, config });
+
+function iniciarEscuta(portaAtual) {
+  server.once("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.log(`⚠️ Porta ${portaAtual} em uso, tentando ${portaAtual + 1}...`);
+      iniciarEscuta(portaAtual + 1);
+    } else {
+      console.error("❌ Erro no servidor:", err);
+    }
+  });
+
+  server.listen(portaAtual, () => {
+    console.log(`\n==================================================`);
+    console.log(`⚡ Dev Server [${config.projectName}] rodando em:`);
+    console.log(`   👉 http://localhost:${portaAtual}`);
+    console.log(`📝 projeto_completo.txt sincronizado.`);
+    console.log(`==================================================`);
+
+    iniciarMenuInterativo(ROOT_DIR, config);
+  });
+}
+
+iniciarEscuta(config.port || 8081);
+
+=== ARQUIVO: \server\livereload.js ===
+/**
+ * Gerenciador de Live Reload via Server-Sent Events (SSE)
+ * Responsabilidade: Manter conexões abertas com os navegadores e disparar reload ao salvar arquivos.
+ */
+let sseClients = [];
+
+function adicionarCliente(res) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+  sseClients.push(res);
+}
+
+function removerCliente(res) {
+  sseClients = sseClients.filter((c) => c !== res);
+}
+
+function notificarRecarregamento() {
+  sseClients.forEach((client) => {
+    try {
+      client.write("data: reload\n\n");
+    } catch (_) {}
+  });
+}
+
+const SCRIPT_LIVE_RELOAD = `
+<script>
+  (function() {
+    const sse = new EventSource('/livereload');
+    sse.onmessage = () => {
+      console.log('⚡ [Dev Server] Alteração detectada. Recarregando...');
+      location.reload();
+    };
+  })();
+</script>
+</body>`;
+
+module.exports = {
+  adicionarCliente,
+  removerCliente,
+  notificarRecarregamento,
+  SCRIPT_LIVE_RELOAD
+};
+
+=== ARQUIVO: \server\menu.js ===
+/**
+ * Menu Interativo do Terminal
+ * Responsabilidade: Exibir opções numeradas, rotear escolhas do usuário e disparar deploys sem necessidade de decorar comandos.
+ */
+const readline = require("readline");
+const { salvarConfig, detectarGitRemote } = require("./config");
+const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
+const { perguntar } = require("./github/prompts");
+const { publicarAtualizacao } = require("./deploy");
+
+function exibirMenu(rootDir, config) {
+  const remote = detectarGitRemote(rootDir);
+  const statusGit = remote
+    ? `${remote.githubUser}/${remote.repoName} (branch: ${config.branch || "main"})`
+    : "Não vinculado (escolha [2] para configurar)";
+
+  console.log(`\n--------------------------------------------------`);
+  console.log(`🐙 GitHub: ${statusGit}`);
+  console.log(`📦 Auto-Publish NPM: ${config.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
+  console.log(`--------------------------------------------------`);
+  console.log(`📋 O QUE VOCÊ DESEJA FAZER?`);
+  console.log(`  [1] 🚀 Publicar alteração (pedir mensagem de commit)`);
+  console.log(`  [2] 🐙 Configurar / Criar repositório no GitHub`);
+  console.log(`  [3] 📦 Alternar Auto-Publish no NPM (${config.autoNpmPublish ? "Desativar" : "Ativar"})`);
+  console.log(`  [4] ⚙️  Configurar porta, branch ou projeto`);
+  console.log(`  [5] 📊 Ver status detalhado`);
+  console.log(`  [6] 🧹 Limpar tela`);
+  console.log(`  [0] ❌ Sair e encerrar servidor`);
+  console.log(`  💡 Atalho: digite a mensagem do commit direto e dê ENTER!`);
+  console.log(`--------------------------------------------------`);
+}
+
+async function configurarOpcoesProjeto(rl, rootDir, config) {
+  console.log(`\n⚙️ CONFIGURAÇÕES DO PROJETO (${config.projectName})`);
+  const porta = await perguntar(rl, `🔌 Porta HTTP [${config.port || 8081}]: `);
+  const branch = await perguntar(rl, `🌿 Branch principal [${config.branch || "main"}]: `);
+  const user = await perguntar(rl, `👤 Usuário GitHub [${config.githubUser}]: `);
+  const repo = await perguntar(rl, `📦 Nome do repositório [${config.repoName}]: `);
+
+  const novaConfig = {
+    ...config,
+    port: Number(porta) || config.port || 8081,
+    branch: branch || config.branch || "main",
+    githubUser: user || config.githubUser,
+    repoName: repo || config.repoName
+  };
+
+  salvarConfig(rootDir, novaConfig);
+  console.log(`✅ Configurações salvas em .devserver.json! (Se mudou a porta, reinicie o servidor).`);
+  return novaConfig;
+}
+
+async function iniciarMenuInterativo(rootDir, configInicial) {
+  let configAtual = configInicial;
+  let ocupado = false;
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  ocupado = true;
+  try {
+    await garantirIdentidadeGit(rl, rootDir);
+  } finally {
+    ocupado = false;
+  }
+
+  exibirMenu(rootDir, configAtual);
+
+  rl.on("line", async (linha) => {
+    if (ocupado) return;
+
+    const entrada = linha.trim();
+    if (!entrada) {
+      exibirMenu(rootDir, configAtual);
+      return;
+    }
+
+    ocupado = true;
+    try {
+      if (entrada === "0") {
+        console.log("\n👋 Encerrando servidor...");
+        process.exit(0);
+      }
+
+      if (entrada === "1") {
+        const msg = await perguntar(rl, `\n📝 Digite a mensagem do commit: `);
+        if (msg) {
+          configAtual = await publicarAtualizacao(rl, msg, rootDir, configAtual);
+        } else {
+          console.log("⚠️ Publicação cancelada (mensagem vazia).");
+        }
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      if (entrada === "2") {
+        configAtual = await executarAssistenteGitHub(rl, rootDir, configAtual);
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      if (entrada === "3") {
+        configAtual = {
+          ...configAtual,
+          autoNpmPublish: !configAtual.autoNpmPublish
+        };
+        salvarConfig(rootDir, configAtual);
+        console.log(`\n✅ Auto-Publish NPM agora está: ${configAtual.autoNpmPublish ? "ATIVADO" : "DESATIVADO"}`);
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      if (entrada === "4") {
+        configAtual = await configurarOpcoesProjeto(rl, rootDir, configAtual);
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      if (entrada === "5") {
+        const remote = detectarGitRemote(rootDir);
+        console.log(`\n📊 STATUS DETALHADO:`);
+        console.log(`   • Pasta Raiz:       ${rootDir}`);
+        console.log(`   • Projeto:          ${configAtual.projectName}`);
+        console.log(`   • Porta Config:     ${configAtual.port}`);
+        console.log(`   • Usuário GitHub:   ${configAtual.githubUser || "(não definido)"}`);
+        console.log(`   • Repositório:      ${configAtual.repoName || "(não definido)"}`);
+        console.log(`   • Remote Origin:    ${remote ? remote.remoteUrl : "(não vinculado)"}`);
+        console.log(`   • Branch:           ${configAtual.branch || "main"}`);
+        console.log(`   • Auto NPM Publish: ${configAtual.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      if (entrada === "6") {
+        console.clear();
+        exibirMenu(rootDir, configAtual);
+        return;
+      }
+
+      // Qualquer outro texto digitado é tratado diretamente como mensagem de commit
+      configAtual = await publicarAtualizacao(rl, entrada, rootDir, configAtual);
+      exibirMenu(rootDir, configAtual);
+    } finally {
+      ocupado = false;
+    }
+  });
+}
+
+module.exports = { iniciarMenuInterativo };
+
+=== ARQUIVO: \server\package.json ===
+{
+  "name": "@nicolasarths/devserver",
+  "version": "1.0.1",
+  "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
+  "main": "index.js",
+  "bin": {
+    "devserver": "index.js",
+    "nic-dev": "index.js"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
+
+=== ARQUIVO: \server\watcher.js ===
+/**
+ * Monitor de Sistema de Arquivos (File Watcher)
+ * Responsabilidade: Detectar modificações no código-fonte e disparar hooks, snapshot e Live Reload.
+ */
+const fs = require("fs");
+const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
+const { notificarRecarregamento } = require("./livereload");
+
+function iniciarWatcher(rootDir, config) {
+  let watchTimeout = null;
+
+  fs.watch(rootDir, { recursive: true }, (eventType, filename) => {
+    if (!filename) return;
+
+    const norm = filename.replace(/\\/g, "/").toLowerCase();
+
+    if (
+      norm.includes(".git/") ||
+      norm.includes("node_modules/") ||
+      norm.includes("modulos.json") ||
+      norm.includes("projeto_completo") ||
+      norm.includes(".devserver.json") ||
+      norm.includes("server.config.json")
+    ) {
+      return;
+    }
+
+    clearTimeout(watchTimeout);
+    watchTimeout = setTimeout(() => {
+      executarHooksOpcionais(rootDir);
+      gerarProjetoCompleto(rootDir, config.snapshotExtensions);
+      notificarRecarregamento();
+    }, 250);
+  });
+}
+
+module.exports = { iniciarWatcher };
+

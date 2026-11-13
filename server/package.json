@@ -1,0 +1,14 @@
+{
+  "name": "@nicolasarths/devserver",
+  "version": "1.0.1",
+  "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
+  "main": "index.js",
+  "bin": {
+    "devserver": "index.js",
+    "nic-dev": "index.js"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
