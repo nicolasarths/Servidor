@@ -66,6 +66,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       ".next",
       ".vscode",
       ".devserver",
+      "devserver.js",
       "package-lock.json",
       "yarn.lock",
       "pnpm-lock.yaml",

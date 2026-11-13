@@ -27,7 +27,6 @@ function isDiretorioDoDevServer(dir) {
 }
 
 function localizarCopiaLocalInstalada(rootDir) {
-  // Verifica onde o código atual está rodando (__dirname) ou se existe cópia local do próprio devserver
   const candidatos = [
     __dirname,
     path.join(rootDir, ".devserver"),
@@ -36,7 +35,6 @@ function localizarCopiaLocalInstalada(rootDir) {
   ];
 
   for (const dir of candidatos) {
-    // Ignora cache global do npx/npm (_npx ou node_modules) pois o npx já baixa @latest sozinho
     const norm = dir.replace(/\\/g, "/").toLowerCase();
     if (norm.includes("/_npx/") || norm.includes("/node_modules/")) {
       continue;
@@ -143,7 +141,6 @@ async function verificarEAtualizarServidor(rootDir, config) {
   atualizacaoEmAndamento = true;
 
   try {
-    // Só aplica auto-update em disco se houver uma cópia local comprovada do @nicolasarths/devserver
     const copiaLocalDir = localizarCopiaLocalInstalada(rootDir);
     if (!copiaLocalDir) return false;
 
@@ -182,5 +179,6 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
 module.exports = {
   verificarEAtualizarServidor,
-  isDiretorioDoDevServer
+  isDiretorioDoDevServer,
+  copiarArquivosAtualizados
 };

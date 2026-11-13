@@ -28,7 +28,6 @@ function isDiretorioDoDevServer(dir) {
 }
 
 function localizarCopiaLocalInstalada(rootDir) {
-  // Verifica onde o código atual está rodando (__dirname) ou se existe cópia local do próprio devserver
   const candidatos = [
     __dirname,
     path.join(rootDir, ".devserver"),
@@ -37,7 +36,6 @@ function localizarCopiaLocalInstalada(rootDir) {
   ];
 
   for (const dir of candidatos) {
-    // Ignora cache global do npx/npm (_npx ou node_modules) pois o npx já baixa @latest sozinho
     const norm = dir.replace(/\\/g, "/").toLowerCase();
     if (norm.includes("/_npx/") || norm.includes("/node_modules/")) {
       continue;
@@ -144,7 +142,6 @@ async function verificarEAtualizarServidor(rootDir, config) {
   atualizacaoEmAndamento = true;
 
   try {
-    // Só aplica auto-update em disco se houver uma cópia local comprovada do @nicolasarths/devserver
     const copiaLocalDir = localizarCopiaLocalInstalada(rootDir);
     if (!copiaLocalDir) return false;
 
@@ -183,7 +180,8 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
 module.exports = {
   verificarEAtualizarServidor,
-  isDiretorioDoDevServer
+  isDiretorioDoDevServer,
+  copiarArquivosAtualizados
 };
 
 === ARQUIVO: \server\builder.js ===
@@ -255,6 +253,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       ".next",
       ".vscode",
       ".devserver",
+      "devserver.js",
       "package-lock.json",
       "yarn.lock",
       "pnpm-lock.yaml",
@@ -707,7 +706,8 @@ function garantirGitIgnore(rootDir) {
     ".DS_Store",
     "Thumbs.db",
     ".devserver.json",
-    ".devserver/"
+    ".devserver/",
+    "devserver.js"
   ];
 
   let conteudoAtual = fs.existsSync(gitignorePath)
@@ -1150,7 +1150,8 @@ module.exports = { criarServidorHttp };
 
 /**
  * Ponto de Entrada do Universal Dev Server
- * Responsabilidade: Verificar conflitos de arquivos server/server.js pré-existentes, iniciar build, watcher, HTTP e menu.
+ * Responsabilidade: Verificar conflitos de server/server.js pré-existentes, provisionar .devserver/ isolado se necessário,
+ * iniciar build, watcher, HTTP sem duplicação de listeners e menu interativo.
  */
 const fs = require("fs");
 const path = require("path");
@@ -1159,51 +1160,65 @@ const { criarServidorHttp } = require("./http");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { iniciarWatcher } = require("./watcher");
 const { iniciarMenuInterativo } = require("./menu");
-const { isDiretorioDoDevServer } = require("./auto-updater");
+const { isDiretorioDoDevServer, copiarArquivosAtualizados } = require("./auto-updater");
 
 const ROOT_DIR = process.cwd();
 const config = carregarConfig(ROOT_DIR);
 
+function provisionarCopiaIsoladaDevServer(rootDir) {
+  const destinoDevServer = path.join(rootDir, ".devserver");
+  const launcherRaiz = path.join(rootDir, "devserver.js");
+
+  // Copia os arquivos do pacote atual (__dirname) para .devserver/ se ainda não existir
+  if (!fs.existsSync(destinoDevServer)) {
+    fs.mkdirSync(destinoDevServer, { recursive: true });
+    copiarArquivosAtualizados(__dirname, destinoDevServer);
+  }
+
+  // Cria o atalho devserver.js na raiz para permitir rodar `node devserver` sem conflitar com `node server`
+  if (!fs.existsSync(launcherRaiz)) {
+    const conteudoLauncher = [
+      "#!/usr/bin/env node",
+      "// Atalho gerado automaticamente pelo @nicolasarths/devserver para evitar conflito com server.js/server/",
+      'require("./.devserver/index.js");',
+      ""
+    ].join("\n");
+    fs.writeFileSync(launcherRaiz, conteudoLauncher, "utf-8");
+  }
+}
+
 function verificarSalvaguardaServidorExistente(rootDir, isNpmPackage) {
-  if (isNpmPackage) return;
+  if (isNpmPackage) return [];
 
   const serverJsRaiz = path.join(rootDir, "server.js");
   const pastaServer = path.join(rootDir, "server");
+  const temServerJs = fs.existsSync(serverJsRaiz) && fs.statSync(serverJsRaiz).isFile();
+  const temPastaServer = fs.existsSync(pastaServer) && fs.statSync(pastaServer).isDirectory();
   const avisos = [];
 
-  if (fs.existsSync(serverJsRaiz) && fs.statSync(serverJsRaiz).isFile()) {
-    avisos.push(
-      `• Encontrado "server.js" na raiz do projeto. Se for um servidor antigo/manual de live-reload, você já pode deletá-lo (ou manter se for sua API backend).`
-    );
-  }
-
-  if (fs.existsSync(pastaServer) && fs.statSync(pastaServer).isDirectory()) {
+  if (temPastaServer) {
     const ehNossoPacote = isDiretorioDoDevServer(pastaServer);
     const normAtual = __dirname.replace(/\\/g, "/").toLowerCase();
 
     if (!ehNossoPacote) {
-      avisos.push(
-        `• Encontrada pasta "server/" própria do projeto. Por segurança, o @nicolasarths/devserver NÃO vai modificar nem sobrescrever essa pasta.`
-      );
-      avisos.push(
-        `  👉 Se essa pasta "server/" for uma versão antiga do nosso dev server sem package.json, delete-a e rode apenas: npx -y @nicolasarths/devserver@latest`
-      );
+      provisionarCopiaIsoladaDevServer(rootDir);
+      avisos.push(`• Detectada pasta "server/" própria do projeto (não pertence ao @nicolasarths/devserver).`);
+      avisos.push(`• Salvaguarda ativada: a pasta "server/" original foi preservada intacta.`);
+      avisos.push(`• Instalado automaticamente em ".devserver/" + atalho "devserver.js" (rode com: node devserver).`);
+      avisos.push(`  👉 Caso "server/" seja apenas uma versão antiga sem package.json do nosso dev server, você pode deletá-la.`);
     } else if (normAtual.includes("/_npx/")) {
-      avisos.push(
-        `• Você rodou via npx, mas ainda existe uma cópia local antiga em "server/". Você pode deletar a pasta "server/" do projeto para mantê-lo limpo!`
-      );
+      avisos.push(`• Você rodou via npx, mas já existe uma cópia local em "server/". Pode deletar "server/" se quiser usar apenas npx.`);
     }
+  } else if (temServerJs) {
+    provisionarCopiaIsoladaDevServer(rootDir);
+    avisos.push(`• Detectado "server.js" próprio na raiz do projeto.`);
+    avisos.push(`• Salvaguarda ativada: instalado em ".devserver/" + atalho "devserver.js" (rode com: node devserver).`);
   }
 
-  if (avisos.length > 0) {
-    console.log(`\n🛡️  [SALVAGUARDA DE ARQUIVOS DETECTADA]`);
-    avisos.forEach((msg) => console.log(msg));
-    console.log(``);
-  }
+  return avisos;
 }
 
-// 0. Verifica se já existe server.js ou pasta server/ no projeto antes de rodar
-verificarSalvaguardaServidorExistente(ROOT_DIR, config.isNpmPackage);
+const avisosSalvaguarda = verificarSalvaguardaServidorExistente(ROOT_DIR, config.isNpmPackage);
 
 // 1. Executa hooks e gera projeto_completo.txt na inicialização
 executarHooksOpcionais(ROOT_DIR);
@@ -1212,28 +1227,41 @@ gerarProjetoCompleto(ROOT_DIR, config.snapshotExtensions);
 // 2. Inicia o monitor de alterações em tempo real
 iniciarWatcher(ROOT_DIR, config);
 
-// 3. Sobe o servidor HTTP com incremento automático se a porta estiver ocupada
+// 3. Sobe o servidor HTTP com incremento automático sem acumular listeners
 const server = criarServidorHttp({ rootDir: ROOT_DIR, config });
 
 function iniciarEscuta(portaAtual) {
-  server.once("error", (err) => {
+  const onError = (err) => {
+    server.removeListener("listening", onListening);
     if (err.code === "EADDRINUSE") {
       console.log(`⚠️ Porta ${portaAtual} em uso, tentando ${portaAtual + 1}...`);
       iniciarEscuta(portaAtual + 1);
     } else {
       console.error("❌ Erro no servidor:", err);
     }
-  });
+  };
 
-  server.listen(portaAtual, () => {
+  const onListening = () => {
+    server.removeListener("error", onError);
     console.log(`\n==================================================`);
     console.log(`⚡ Dev Server [${config.projectName}] rodando em:`);
     console.log(`   👉 http://localhost:${portaAtual}`);
     console.log(`📝 projeto_completo.txt sincronizado.`);
+
+    if (avisosSalvaguarda.length > 0) {
+      console.log(`--------------------------------------------------`);
+      console.log(`🛡️  SALVAGUARDA DE ARQUIVOS ATIVADA:`);
+      avisosSalvaguarda.forEach((msg) => console.log(msg));
+    }
+
     console.log(`==================================================`);
 
     iniciarMenuInterativo(ROOT_DIR, config);
-  });
+  };
+
+  server.once("error", onError);
+  server.once("listening", onListening);
+  server.listen(portaAtual);
 }
 
 iniciarEscuta(config.port || 8081);
@@ -1428,7 +1456,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {

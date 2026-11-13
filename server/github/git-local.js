@@ -13,7 +13,8 @@ function garantirGitIgnore(rootDir) {
     ".DS_Store",
     "Thumbs.db",
     ".devserver.json",
-    ".devserver/"
+    ".devserver/",
+    "devserver.js"
   ];
 
   let conteudoAtual = fs.existsSync(gitignorePath)
