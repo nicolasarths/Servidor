@@ -7,10 +7,10 @@ const path = require("path");
 const { execSync } = require("child_process");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
-const { detectarGitRemote, localizarPastaPacoteNpm } = require("./config");
+const { detectarGitRemote, detectarModoPacoteNpm } = require("./config");
 
 async function aguardarDeployGitHubPages(versaoAlvo, config) {
-  if (!config.githubUser || !config.repoName || config.autoNpmPublish) return;
+  if (!config.githubUser || !config.repoName || config.isNpmPackage) return;
 
   const checkFile = config.pagesCheckFile || "index.html";
   const urlBase = `https://${config.githubUser}.github.io/${config.repoName}`;
@@ -102,7 +102,6 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   let configAtual = config;
   let remote = detectarGitRemote(rootDir);
 
-  // Se ainda não há repositório vinculado, abre o assistente imediatamente e continua o deploy depois!
   if (!remote) {
     console.log(`\n⚠️ Nenhum repositório remoto configurado neste projeto ainda!`);
     console.log(`🔧 Iniciando configuração automática do GitHub antes de publicar "${mensagemCommit}"...\n`);
@@ -124,10 +123,13 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   console.log(`\n📦 [Deploy ${configAtual.projectName}] Publicando: "${mensagemCommit}"`);
   console.log(`🏷️ Versão gerada: v${timestampVersao}`);
 
+  const modoNpm = configAtual.isNpmPackage
+    ? { isNpmPackage: true, npmPackageDir: configAtual.npmPackageDir }
+    : detectarModoPacoteNpm(rootDir);
+
   let versaoNpm = null;
-  const pkgDir = configAtual.npmPackageDir || localizarPastaPacoteNpm(rootDir) || rootDir;
-  if (configAtual.autoNpmPublish) {
-    versaoNpm = incrementarVersaoPacoteNpm(pkgDir);
+  if (modoNpm.isNpmPackage && modoNpm.npmPackageDir) {
+    versaoNpm = incrementarVersaoPacoteNpm(modoNpm.npmPackageDir);
   }
 
   const indexPath = path.join(rootDir, "index.html");
@@ -160,12 +162,11 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
     const branch = configAtual.branch || "main";
     execSync("git add .", { stdio: "inherit", cwd: rootDir });
 
-    // Verifica se há alterações pendentes para commitar (caso o assistente já tenha feito o initial commit)
     const statusPorcelain = execSync("git status --porcelain", { cwd: rootDir }).toString().trim();
     if (!statusPorcelain) {
       console.log(`ℹ️ Nenhuma alteração nova pendente após o setup inicial.`);
-      if (configAtual.autoNpmPublish && versaoNpm) {
-        publicarNoNpm(pkgDir, versaoNpm);
+      if (modoNpm.isNpmPackage && versaoNpm) {
+        publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
       }
       return configAtual;
     }
@@ -179,8 +180,8 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
 
     console.log(`✅ Push no GitHub concluído com sucesso!`);
 
-    if (configAtual.autoNpmPublish && versaoNpm) {
-      publicarNoNpm(pkgDir, versaoNpm);
+    if (modoNpm.isNpmPackage && versaoNpm) {
+      publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
     } else {
       aguardarDeployGitHubPages(timestampVersao, configAtual);
     }

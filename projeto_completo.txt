@@ -1,3 +1,154 @@
+=== ARQUIVO: \server\auto-updater.js ===
+/**
+ * Auto-Updater do Pacote @nicolasarths/devserver
+ * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente,
+ * baixar e atualizar a pasta server/ local antes dos processos pós-save.
+ */
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execSync } = require("child_process");
+
+const PACKAGE_NAME = "@nicolasarths/devserver";
+const REGISTRY_URL = "https://registry.npmjs.org/@nicolasarths%2Fdevserver/latest";
+const COOLDOWN_MS = 60 * 1000;
+
+let ultimaVerificacaoTimestamp = 0;
+let atualizacaoEmAndamento = false;
+
+function obterVersaoLocal(rootDir) {
+  const candidatos = [
+    path.join(__dirname, "package.json"),
+    path.join(rootDir, "server", "package.json"),
+    path.join(rootDir, "package.json")
+  ];
+
+  for (const pkgPath of candidatos) {
+    if (!fs.existsSync(pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      if (pkg.name === PACKAGE_NAME && pkg.version) {
+        return pkg.version;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function compararSemver(remota, local) {
+  const r = String(remota).split(".").map((n) => parseInt(n, 10) || 0);
+  const l = String(local).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((r[i] || 0) > (l[i] || 0)) return 1;
+    if ((r[i] || 0) < (l[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+function copiarArquivosAtualizados(origemDir, destinoDir) {
+  const itens = fs.readdirSync(origemDir, { withFileTypes: true });
+  for (const item of itens) {
+    const srcPath = path.join(origemDir, item.name);
+    const destPath = path.join(destinoDir, item.name);
+
+    if (item.isDirectory()) {
+      fs.mkdirSync(destPath, { recursive: true });
+      copiarArquivosAtualizados(srcPath, destPath);
+    } else if (item.isFile()) {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+function limparCacheModulosServer(serverDir) {
+  Object.keys(require.cache).forEach((chave) => {
+    if (chave.startsWith(serverDir) && !chave.endsWith("auto-updater.js")) {
+      delete require.cache[chave];
+    }
+  });
+}
+
+async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersao) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nic-devserver-"));
+  const tgzPath = path.join(tempDir, "package.tgz");
+  const extractDir = path.join(tempDir, "extracted");
+
+  try {
+    const res = await fetch(tarballUrl);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ao baixar tarball`);
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(tgzPath, buffer);
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    execSync(`tar -xzf "${tgzPath}" -C "${extractDir}"`, { stdio: "ignore" });
+
+    const packageRoot = path.join(extractDir, "package");
+    if (!fs.existsSync(packageRoot)) {
+      throw new Error("Estrutura do pacote extraído inválida.");
+    }
+
+    fs.mkdirSync(destinoServerDir, { recursive: true });
+    copiarArquivosAtualizados(packageRoot, destinoServerDir);
+    limparCacheModulosServer(destinoServerDir);
+
+    console.log(`🔄 [Auto-Update] Pasta server/ atualizada para v${novaVersao} com sucesso!`);
+    return true;
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (_) {}
+  }
+}
+
+async function verificarEAtualizarServidor(rootDir, config) {
+  if (config?.isNpmPackage) return false;
+
+  const agora = Date.now();
+  if (atualizacaoEmAndamento || agora - ultimaVerificacaoTimestamp < COOLDOWN_MS) {
+    return false;
+  }
+
+  ultimaVerificacaoTimestamp = agora;
+  atualizacaoEmAndamento = true;
+
+  try {
+    const versaoLocal = obterVersaoLocal(rootDir);
+    if (!versaoLocal) return false;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(REGISTRY_URL, {
+      signal: controller.signal,
+      headers: { "Cache-Control": "no-cache" }
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) return false;
+
+    const meta = await res.json();
+    const versaoRemota = meta?.version;
+    const tarballUrl = meta?.dist?.tarball;
+
+    if (!versaoRemota || !tarballUrl) return false;
+
+    if (compararSemver(versaoRemota, versaoLocal) > 0) {
+      console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
+      const pastaServerAlvo = path.join(rootDir, "server");
+      return await baixarEAplicarAtualizacao(tarballUrl, pastaServerAlvo, versaoRemota);
+    }
+
+    return false;
+  } catch (_) {
+    return false;
+  } finally {
+    atualizacaoEmAndamento = false;
+  }
+}
+
+module.exports = { verificarEAtualizarServidor };
+
 === ARQUIVO: \server\builder.js ===
 /**
  * Gerador de Snapshot e Hooks de Build
@@ -114,8 +265,8 @@ module.exports = {
 === ARQUIVO: \server\config.js ===
 /**
  * Gerenciador de Configuração por Projeto
- * Responsabilidade: Detectar metadados do projeto via process.cwd() (incluindo auto-detecção de pacote NPM próprio)
- * e persistir ajustes em .devserver.json na raiz do projeto sem intervenção manual.
+ * Responsabilidade: Detectar automaticamente se o projeto atual é um pacote NPM ou um projeto Web/GitHub
+ * e persistir apenas metadados básicos em .devserver.json.
  */
 const fs = require("fs");
 const path = require("path");
@@ -144,58 +295,71 @@ function detectarGitRemote(rootDir) {
   return null;
 }
 
-function localizarPastaPacoteNpm(rootDir) {
+function detectarModoPacoteNpm(rootDir) {
   const candidatos = [rootDir, path.join(rootDir, "server")];
   for (const dir of candidatos) {
     const pkgPath = path.join(dir, "package.json");
     if (!fs.existsSync(pkgPath)) continue;
     try {
       const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-      if (pkg.name === "@nicolasarths/devserver" || Boolean(pkg.bin && pkg.publishConfig?.access === "public")) {
-        return dir;
+      const isPacotePublico =
+        pkg.name === "@nicolasarths/devserver" ||
+        Boolean(pkg.bin && pkg.publishConfig?.access === "public");
+
+      if (isPacotePublico) {
+        return {
+          isNpmPackage: true,
+          npmPackageDir: dir,
+          packageName: pkg.name
+        };
       }
     } catch (_) {}
   }
-  return null;
+  return {
+    isNpmPackage: false,
+    npmPackageDir: "",
+    packageName: ""
+  };
 }
 
 function carregarConfig(rootDir) {
   const configPath = path.join(rootDir, CONFIG_FILENAME);
   const nomePastaRaiz = path.basename(rootDir);
   const gitInfo = detectarGitRemote(rootDir);
-  const npmPackageDir = localizarPastaPacoteNpm(rootDir);
+  const modoNpm = detectarModoPacoteNpm(rootDir);
 
-  const padrao = {
-    projectName: nomePastaRaiz,
-    port: 8081,
-    githubUser: gitInfo?.githubUser || "",
-    repoName: gitInfo?.repoName || nomePastaRaiz,
-    branch: "main",
-    autoNpmPublish: Boolean(npmPackageDir),
-    npmPackageDir: npmPackageDir || "",
-    pagesCheckFile: fs.existsSync(path.join(rootDir, "manifest.json")) ? "manifest.json" : "index.html",
-    snapshotExtensions: [".js", ".html", ".css", ".json", ".ts", ".jsx", ".tsx", ".md"]
-  };
-
+  let salvo = {};
   if (fs.existsSync(configPath)) {
     try {
-      const salvo = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      return {
-        ...padrao,
-        ...salvo,
-        // Sempre mantém o caminho real do pacote atualizado se detectado
-        npmPackageDir: npmPackageDir || salvo.npmPackageDir || ""
-      };
+      salvo = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      // Remove eventual resquício antigo de autoNpmPublish manual
+      delete salvo.autoNpmPublish;
+      delete salvo.npmPackageDir;
     } catch (_) {}
   }
 
-  salvarConfig(rootDir, padrao);
-  return padrao;
+  const configFinal = {
+    projectName: salvo.projectName || nomePastaRaiz,
+    port: salvo.port || 8081,
+    githubUser: salvo.githubUser || gitInfo?.githubUser || "",
+    repoName: salvo.repoName || gitInfo?.repoName || nomePastaRaiz,
+    branch: salvo.branch || "main",
+    pagesCheckFile: salvo.pagesCheckFile || (fs.existsSync(path.join(rootDir, "manifest.json")) ? "manifest.json" : "index.html"),
+    snapshotExtensions: salvo.snapshotExtensions || [".js", ".html", ".css", ".json", ".ts", ".jsx", ".tsx", ".md"],
+    // Propriedades dinâmicas inferidas automaticamente (não dependem de configuração manual)
+    isNpmPackage: modoNpm.isNpmPackage,
+    npmPackageDir: modoNpm.npmPackageDir,
+    packageName: modoNpm.packageName
+  };
+
+  salvarConfig(rootDir, configFinal);
+  return configFinal;
 }
 
 function salvarConfig(rootDir, novaConfig) {
   const configPath = path.join(rootDir, CONFIG_FILENAME);
-  fs.writeFileSync(configPath, JSON.stringify(novaConfig, null, 2), "utf-8");
+  const { isNpmPackage, npmPackageDir, packageName, ...persistir } = novaConfig;
+  fs.writeFileSync(configPath, JSON.stringify(persistir, null, 2), "utf-8");
 }
 
 module.exports = {
@@ -203,7 +367,7 @@ module.exports = {
   carregarConfig,
   salvarConfig,
   detectarGitRemote,
-  localizarPastaPacoteNpm
+  detectarModoPacoteNpm
 };
 
 === ARQUIVO: \server\deploy.js ===
@@ -216,10 +380,10 @@ const path = require("path");
 const { execSync } = require("child_process");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
-const { detectarGitRemote, localizarPastaPacoteNpm } = require("./config");
+const { detectarGitRemote, detectarModoPacoteNpm } = require("./config");
 
 async function aguardarDeployGitHubPages(versaoAlvo, config) {
-  if (!config.githubUser || !config.repoName || config.autoNpmPublish) return;
+  if (!config.githubUser || !config.repoName || config.isNpmPackage) return;
 
   const checkFile = config.pagesCheckFile || "index.html";
   const urlBase = `https://${config.githubUser}.github.io/${config.repoName}`;
@@ -311,7 +475,6 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   let configAtual = config;
   let remote = detectarGitRemote(rootDir);
 
-  // Se ainda não há repositório vinculado, abre o assistente imediatamente e continua o deploy depois!
   if (!remote) {
     console.log(`\n⚠️ Nenhum repositório remoto configurado neste projeto ainda!`);
     console.log(`🔧 Iniciando configuração automática do GitHub antes de publicar "${mensagemCommit}"...\n`);
@@ -333,10 +496,13 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   console.log(`\n📦 [Deploy ${configAtual.projectName}] Publicando: "${mensagemCommit}"`);
   console.log(`🏷️ Versão gerada: v${timestampVersao}`);
 
+  const modoNpm = configAtual.isNpmPackage
+    ? { isNpmPackage: true, npmPackageDir: configAtual.npmPackageDir }
+    : detectarModoPacoteNpm(rootDir);
+
   let versaoNpm = null;
-  const pkgDir = configAtual.npmPackageDir || localizarPastaPacoteNpm(rootDir) || rootDir;
-  if (configAtual.autoNpmPublish) {
-    versaoNpm = incrementarVersaoPacoteNpm(pkgDir);
+  if (modoNpm.isNpmPackage && modoNpm.npmPackageDir) {
+    versaoNpm = incrementarVersaoPacoteNpm(modoNpm.npmPackageDir);
   }
 
   const indexPath = path.join(rootDir, "index.html");
@@ -369,12 +535,11 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
     const branch = configAtual.branch || "main";
     execSync("git add .", { stdio: "inherit", cwd: rootDir });
 
-    // Verifica se há alterações pendentes para commitar (caso o assistente já tenha feito o initial commit)
     const statusPorcelain = execSync("git status --porcelain", { cwd: rootDir }).toString().trim();
     if (!statusPorcelain) {
       console.log(`ℹ️ Nenhuma alteração nova pendente após o setup inicial.`);
-      if (configAtual.autoNpmPublish && versaoNpm) {
-        publicarNoNpm(pkgDir, versaoNpm);
+      if (modoNpm.isNpmPackage && versaoNpm) {
+        publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
       }
       return configAtual;
     }
@@ -388,8 +553,8 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
 
     console.log(`✅ Push no GitHub concluído com sucesso!`);
 
-    if (configAtual.autoNpmPublish && versaoNpm) {
-      publicarNoNpm(pkgDir, versaoNpm);
+    if (modoNpm.isNpmPackage && versaoNpm) {
+      publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
     } else {
       aguardarDeployGitHubPages(timestampVersao, configAtual);
     }
@@ -1041,7 +1206,7 @@ module.exports = {
 === ARQUIVO: \server\menu.js ===
 /**
  * Menu Interativo do Terminal
- * Responsabilidade: Exibir opções numeradas, rotear escolhas do usuário e disparar deploys (usando "Update sem descrição" se der Enter vazio).
+ * Responsabilidade: Exibir o modo detectado automaticamente (Pacote NPM vs Projeto Web/GitHub) e rotear opções do usuário.
  */
 const readline = require("readline");
 const { salvarConfig, detectarGitRemote } = require("./config");
@@ -1057,17 +1222,20 @@ function exibirMenu(rootDir, config) {
     ? `${remote.githubUser}/${remote.repoName} (branch: ${config.branch || "main"})`
     : "Não vinculado (escolha [2] para configurar)";
 
+  const modoDetectado = config.isNpmPackage
+    ? `📦 Pacote NPM (${config.packageName}) ➔ GitHub + Auto-Publish NPM`
+    : `🌐 Projeto Web/GitHub ➔ GitHub + Monitor GitHub Pages`;
+
   console.log(`\n--------------------------------------------------`);
+  console.log(`🔍 Modo:   ${modoDetectado}`);
   console.log(`🐙 GitHub: ${statusGit}`);
-  console.log(`📦 Auto-Publish NPM: ${config.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
   console.log(`--------------------------------------------------`);
   console.log(`📋 O QUE VOCÊ DESEJA FAZER?`);
   console.log(`  [1] 🚀 Publicar alteração (pedir mensagem de commit)`);
   console.log(`  [2] 🐙 Configurar / Criar repositório no GitHub`);
-  console.log(`  [3] 📦 Alternar Auto-Publish no NPM (${config.autoNpmPublish ? "Desativar" : "Ativar"})`);
-  console.log(`  [4] ⚙️  Configurar porta, branch ou projeto`);
-  console.log(`  [5] 📊 Ver status detalhado`);
-  console.log(`  [6] 🧹 Limpar tela`);
+  console.log(`  [3] ⚙️  Configurar porta, branch ou projeto`);
+  console.log(`  [4] 📊 Ver status detalhado`);
+  console.log(`  [5] 🧹 Limpar tela`);
   console.log(`  [0] ❌ Sair e encerrar servidor`);
   console.log(`  💡 Atalho: digite a mensagem e dê ENTER (ou só ENTER para "${MENSAGEM_PADRAO}")`);
   console.log(`--------------------------------------------------`);
@@ -1137,38 +1305,27 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
       }
 
       if (entrada === "3") {
-        configAtual = {
-          ...configAtual,
-          autoNpmPublish: !configAtual.autoNpmPublish
-        };
-        salvarConfig(rootDir, configAtual);
-        console.log(`\n✅ Auto-Publish NPM agora está: ${configAtual.autoNpmPublish ? "ATIVADO" : "DESATIVADO"}`);
-        exibirMenu(rootDir, configAtual);
-        return;
-      }
-
-      if (entrada === "4") {
         configAtual = await configurarOpcoesProjeto(rl, rootDir, configAtual);
         exibirMenu(rootDir, configAtual);
         return;
       }
 
-      if (entrada === "5") {
+      if (entrada === "4") {
         const remote = detectarGitRemote(rootDir);
         console.log(`\n📊 STATUS DETALHADO:`);
-        console.log(`   • Pasta Raiz:       ${rootDir}`);
-        console.log(`   • Projeto:          ${configAtual.projectName}`);
-        console.log(`   • Porta Config:     ${configAtual.port}`);
-        console.log(`   • Usuário GitHub:   ${configAtual.githubUser || "(não definido)"}`);
-        console.log(`   • Repositório:      ${configAtual.repoName || "(não definido)"}`);
-        console.log(`   • Remote Origin:    ${remote ? remote.remoteUrl : "(não vinculado)"}`);
-        console.log(`   • Branch:           ${configAtual.branch || "main"}`);
-        console.log(`   • Auto NPM Publish: ${configAtual.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
+        console.log(`   • Pasta Raiz:     ${rootDir}`);
+        console.log(`   • Projeto:        ${configAtual.projectName}`);
+        console.log(`   • Tipo Detectado: ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
+        console.log(`   • Porta Config:   ${configAtual.port}`);
+        console.log(`   • Usuário GitHub: ${configAtual.githubUser || "(não definido)"}`);
+        console.log(`   • Repositório:    ${configAtual.repoName || "(não definido)"}`);
+        console.log(`   • Remote Origin:  ${remote ? remote.remoteUrl : "(não vinculado)"}`);
+        console.log(`   • Branch:         ${configAtual.branch || "main"}`);
         exibirMenu(rootDir, configAtual);
         return;
       }
 
-      if (entrada === "6") {
+      if (entrada === "5") {
         console.clear();
         exibirMenu(rootDir, configAtual);
         return;
@@ -1189,7 +1346,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
@@ -1201,6 +1358,7 @@ module.exports = { iniciarMenuInterativo };
     "access": "public"
   }
 }
+
 
 === ARQUIVO: \server\watcher.js ===
 /**

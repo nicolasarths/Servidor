@@ -1,6 +1,6 @@
 /**
  * Menu Interativo do Terminal
- * Responsabilidade: Exibir opções numeradas, rotear escolhas do usuário e disparar deploys (usando "Update sem descrição" se der Enter vazio).
+ * Responsabilidade: Exibir o modo detectado automaticamente (Pacote NPM vs Projeto Web/GitHub) e rotear opções do usuário.
  */
 const readline = require("readline");
 const { salvarConfig, detectarGitRemote } = require("./config");
@@ -16,17 +16,20 @@ function exibirMenu(rootDir, config) {
     ? `${remote.githubUser}/${remote.repoName} (branch: ${config.branch || "main"})`
     : "Não vinculado (escolha [2] para configurar)";
 
+  const modoDetectado = config.isNpmPackage
+    ? `📦 Pacote NPM (${config.packageName}) ➔ GitHub + Auto-Publish NPM`
+    : `🌐 Projeto Web/GitHub ➔ GitHub + Monitor GitHub Pages`;
+
   console.log(`\n--------------------------------------------------`);
+  console.log(`🔍 Modo:   ${modoDetectado}`);
   console.log(`🐙 GitHub: ${statusGit}`);
-  console.log(`📦 Auto-Publish NPM: ${config.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
   console.log(`--------------------------------------------------`);
   console.log(`📋 O QUE VOCÊ DESEJA FAZER?`);
   console.log(`  [1] 🚀 Publicar alteração (pedir mensagem de commit)`);
   console.log(`  [2] 🐙 Configurar / Criar repositório no GitHub`);
-  console.log(`  [3] 📦 Alternar Auto-Publish no NPM (${config.autoNpmPublish ? "Desativar" : "Ativar"})`);
-  console.log(`  [4] ⚙️  Configurar porta, branch ou projeto`);
-  console.log(`  [5] 📊 Ver status detalhado`);
-  console.log(`  [6] 🧹 Limpar tela`);
+  console.log(`  [3] ⚙️  Configurar porta, branch ou projeto`);
+  console.log(`  [4] 📊 Ver status detalhado`);
+  console.log(`  [5] 🧹 Limpar tela`);
   console.log(`  [0] ❌ Sair e encerrar servidor`);
   console.log(`  💡 Atalho: digite a mensagem e dê ENTER (ou só ENTER para "${MENSAGEM_PADRAO}")`);
   console.log(`--------------------------------------------------`);
@@ -96,38 +99,27 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
       }
 
       if (entrada === "3") {
-        configAtual = {
-          ...configAtual,
-          autoNpmPublish: !configAtual.autoNpmPublish
-        };
-        salvarConfig(rootDir, configAtual);
-        console.log(`\n✅ Auto-Publish NPM agora está: ${configAtual.autoNpmPublish ? "ATIVADO" : "DESATIVADO"}`);
-        exibirMenu(rootDir, configAtual);
-        return;
-      }
-
-      if (entrada === "4") {
         configAtual = await configurarOpcoesProjeto(rl, rootDir, configAtual);
         exibirMenu(rootDir, configAtual);
         return;
       }
 
-      if (entrada === "5") {
+      if (entrada === "4") {
         const remote = detectarGitRemote(rootDir);
         console.log(`\n📊 STATUS DETALHADO:`);
-        console.log(`   • Pasta Raiz:       ${rootDir}`);
-        console.log(`   • Projeto:          ${configAtual.projectName}`);
-        console.log(`   • Porta Config:     ${configAtual.port}`);
-        console.log(`   • Usuário GitHub:   ${configAtual.githubUser || "(não definido)"}`);
-        console.log(`   • Repositório:      ${configAtual.repoName || "(não definido)"}`);
-        console.log(`   • Remote Origin:    ${remote ? remote.remoteUrl : "(não vinculado)"}`);
-        console.log(`   • Branch:           ${configAtual.branch || "main"}`);
-        console.log(`   • Auto NPM Publish: ${configAtual.autoNpmPublish ? "ATIVADO" : "Desativado"}`);
+        console.log(`   • Pasta Raiz:     ${rootDir}`);
+        console.log(`   • Projeto:        ${configAtual.projectName}`);
+        console.log(`   • Tipo Detectado: ${configAtual.isNpmPackage ? `Pacote NPM (${configAtual.packageName})` : "Projeto Web / GitHub"}`);
+        console.log(`   • Porta Config:   ${configAtual.port}`);
+        console.log(`   • Usuário GitHub: ${configAtual.githubUser || "(não definido)"}`);
+        console.log(`   • Repositório:    ${configAtual.repoName || "(não definido)"}`);
+        console.log(`   • Remote Origin:  ${remote ? remote.remoteUrl : "(não vinculado)"}`);
+        console.log(`   • Branch:         ${configAtual.branch || "main"}`);
         exibirMenu(rootDir, configAtual);
         return;
       }
 
-      if (entrada === "6") {
+      if (entrada === "5") {
         console.clear();
         exibirMenu(rootDir, configAtual);
         return;

@@ -10,7 +10,7 @@ const { execSync } = require("child_process");
 
 const PACKAGE_NAME = "@nicolasarths/devserver";
 const REGISTRY_URL = "https://registry.npmjs.org/@nicolasarths%2Fdevserver/latest";
-const COOLDOWN_MS = 60 * 1000; // Trava de segurança de 60 segundos
+const COOLDOWN_MS = 60 * 1000;
 
 let ultimaVerificacaoTimestamp = 0;
 let atualizacaoEmAndamento = false;
@@ -80,10 +80,8 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersa
     fs.writeFileSync(tgzPath, buffer);
     fs.mkdirSync(extractDir, { recursive: true });
 
-    // Windows 10/11, Linux e macOS possuem tar nativo no sistema
     execSync(`tar -xzf "${tgzPath}" -C "${extractDir}"`, { stdio: "ignore" });
 
-    // Pacotes NPM sempre extraem dentro de uma subpasta chamada "package"
     const packageRoot = path.join(extractDir, "package");
     if (!fs.existsSync(packageRoot)) {
       throw new Error("Estrutura do pacote extraído inválida.");
@@ -103,8 +101,7 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersa
 }
 
 async function verificarEAtualizarServidor(rootDir, config) {
-  // Não auto-sobrescreve quando estiver desenvolvendo o próprio pacote do servidor
-  if (config?.autoNpmPublish) return false;
+  if (config?.isNpmPackage) return false;
 
   const agora = Date.now();
   if (atualizacaoEmAndamento || agora - ultimaVerificacaoTimestamp < COOLDOWN_MS) {
@@ -143,7 +140,6 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
     return false;
   } catch (_) {
-    // Falha silenciosa (ex: offline) para nunca travar o fluxo de salvamento
     return false;
   } finally {
     atualizacaoEmAndamento = false;
