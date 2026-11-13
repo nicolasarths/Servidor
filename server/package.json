@@ -1,6 +1,6 @@
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Servidor de desenvolvimento zero-config com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {

@@ -1,13 +1,18 @@
 /**
  * Motor de Deploy, NPM Auto-Publish e Monitoramento do GitHub Pages
- * Responsabilidade: Garantir configuração GitHub automaticamente se ausente, versionar, publicar no Git/NPM e monitorar Pages.
+ * Responsabilidade: Garantir configuração GitHub automaticamente se ausente, versionar, publicar no Git/NPM com resumo limpo e monitorar Pages.
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
 const { detectarGitRemote, detectarModoPacoteNpm } = require("./config");
+const {
+  executarSilencioso,
+  resumirAlteracoesGit,
+  exibirCaixaErro,
+  exibirCaixaAlerta
+} = require("./logger");
 
 async function aguardarDeployGitHubPages(versaoAlvo, config) {
   if (!config.githubUser || !config.repoName || config.isNpmPackage) return;
@@ -16,13 +21,7 @@ async function aguardarDeployGitHubPages(versaoAlvo, config) {
   const urlBase = `https://${config.githubUser}.github.io/${config.repoName}`;
   const targetUrl = `${urlBase}/${checkFile}`;
 
-  console.log(`\n==================================================`);
-  console.log(`📡 [Monitor Pages] Acompanhando build no GitHub...`);
-  console.log(`🌐 URL: ${urlBase}/`);
-  if (checkFile === "manifest.json") {
-    console.log(`🎯 Aguardando versão remota: v${versaoAlvo}`);
-  }
-  console.log(`==================================================\n`);
+  console.log(`📡 [Pages] Monitorando build em ${urlBase}/ ...`);
 
   const intervaloMs = 5000;
   const maxTentativas = 48;
@@ -48,7 +47,7 @@ async function aguardarDeployGitHubPages(versaoAlvo, config) {
           if (json.version === versaoAlvo) {
             clearInterval(timer);
             try { process.stdout.write("\x07"); } catch (_) {}
-            console.log(`\n🎉 [GITHUB PAGES NO AR!] v${versaoAlvo} publicada em ${decorridoSegundos}s!\n`);
+            console.log(`🎉 [Pages NO AR] v${versaoAlvo} publicada em ${decorridoSegundos}s!`);
             return;
           }
         } else {
@@ -56,19 +55,19 @@ async function aguardarDeployGitHubPages(versaoAlvo, config) {
           if (html.includes(versaoAlvo) || tentativas >= 4) {
             clearInterval(timer);
             try { process.stdout.write("\x07"); } catch (_) {}
-            console.log(`\n🎉 [GITHUB PAGES NO AR!] Atualização publicada em ${decorridoSegundos}s!\n`);
+            console.log(`🎉 [Pages NO AR] Atualização publicada em ${decorridoSegundos}s!`);
             return;
           }
         }
       }
     } catch (_) {}
 
-    console.log(`⏳ [${decorridoSegundos}s] GitHub Actions compilando...`);
-
     if (tentativas >= maxTentativas) {
       clearInterval(timer);
-      console.log(`\n⚠️ Tempo limite de monitorização excedido (4 min).`);
-      console.log(`Verifique em: https://github.com/${config.githubUser}/${config.repoName}/actions\n`);
+      exibirCaixaAlerta(
+        "Tempo limite do monitor do GitHub Pages excedido (4 min).",
+        `Verifique o status em: https://github.com/${config.githubUser}/${config.repoName}/actions`
+      );
     }
   }, intervaloMs);
 }
@@ -77,24 +76,29 @@ function incrementarVersaoPacoteNpm(pkgDir) {
   const pkgPath = path.join(pkgDir, "package.json");
   if (!fs.existsSync(pkgPath)) return null;
 
+  const res = executarSilencioso("npm version patch --no-git-tag-version", pkgDir);
+  if (!res.ok) {
+    exibirCaixaAlerta("Não foi possível incrementar a versão do package.json", res.stderr);
+    return null;
+  }
+
   try {
-    execSync("npm version patch --no-git-tag-version", { cwd: pkgDir, stdio: "ignore" });
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    console.log(`📦 [NPM] Versão do pacote incrementada para: ${pkg.version}`);
     return pkg.version;
-  } catch (err) {
-    console.error(`⚠️ Não foi possível incrementar versão no package.json:`, err.message);
+  } catch (_) {
     return null;
   }
 }
 
 function publicarNoNpm(pkgDir, versao) {
-  try {
-    console.log(`🚀 [NPM] Publicando v${versao} no registro do npm...`);
-    execSync("npm publish --access public", { cwd: pkgDir, stdio: "inherit" });
-    console.log(`🎉 [NPM PUBLICADO!] v${versao} já está disponível via npx!\n`);
-  } catch (err) {
-    console.error(`❌ Falha ao publicar no npm:`, err.message);
+  process.stdout.write(`⏳ Publicando v${versao} no NPM... `);
+  const res = executarSilencioso("npm publish --access public", pkgDir);
+
+  if (res.ok) {
+    console.log(`✅ Concluído! (@nicolasarths/devserver@${versao})`);
+  } else {
+    console.log(`❌ Falhou!`);
+    exibirCaixaErro(`Falha ao publicar v${versao} no NPM`, res.stderr || res.stdout);
   }
 }
 
@@ -103,13 +107,15 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   let remote = detectarGitRemote(rootDir);
 
   if (!remote) {
-    console.log(`\n⚠️ Nenhum repositório remoto configurado neste projeto ainda!`);
-    console.log(`🔧 Iniciando configuração automática do GitHub antes de publicar "${mensagemCommit}"...\n`);
+    exibirCaixaAlerta(
+      "Nenhum repositório remoto configurado neste projeto.",
+      `Iniciando assistente do GitHub antes de publicar "${mensagemCommit}"...`
+    );
     configAtual = await executarAssistenteGitHub(rl, rootDir, configAtual);
     remote = detectarGitRemote(rootDir);
 
     if (!remote) {
-      console.log(`❌ Publicação interrompida porque nenhum repositório foi vinculado.\n`);
+      exibirCaixaAlerta("Publicação cancelada porque nenhum repositório foi vinculado.");
       return configAtual;
     }
   }
@@ -119,9 +125,6 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
   const agora = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const timestampVersao = `${agora.getFullYear()}.${agora.getMonth() + 1}.${agora.getDate()}-${pad(agora.getHours())}${pad(agora.getMinutes())}`;
-
-  console.log(`\n📦 [Deploy ${configAtual.projectName}] Publicando: "${mensagemCommit}"`);
-  console.log(`🏷️ Versão gerada: v${timestampVersao}`);
 
   const modoNpm = configAtual.isNpmPackage
     ? { isNpmPackage: true, npmPackageDir: configAtual.npmPackageDir }
@@ -141,7 +144,6 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
     );
     if (atualizado !== indexHtml) {
       fs.writeFileSync(indexPath, atualizado, "utf-8");
-      console.log(`✅ Scripts locais do index.html versionados com ?v=${timestampVersao}`);
     }
   }
 
@@ -151,44 +153,67 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
       manifest.version = timestampVersao;
       fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
-      console.log(`✅ manifest.json atualizado para ${timestampVersao}`);
     } catch (_) {}
   }
 
   executarHooksOpcionais(rootDir);
   gerarProjetoCompleto(rootDir, configAtual.snapshotExtensions);
 
-  try {
-    const branch = configAtual.branch || "main";
-    execSync("git add .", { stdio: "inherit", cwd: rootDir });
-
-    const statusPorcelain = execSync("git status --porcelain", { cwd: rootDir }).toString().trim();
-    if (!statusPorcelain) {
-      console.log(`ℹ️ Nenhuma alteração nova pendente após o setup inicial.`);
-      if (modoNpm.isNpmPackage && versaoNpm) {
-        publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
-      }
-      return configAtual;
-    }
-
-    const tagMsg = versaoNpm ? `v${versaoNpm}` : `v${timestampVersao}`;
-    const commitMsgFormatada = `${tagMsg}: ${mensagemCommit}`;
-    execSync(`git commit -m "${commitMsgFormatada.replace(/"/g, '\\"')}"`, { stdio: "inherit", cwd: rootDir });
-
-    console.log(`🚀 Enviando para origin/${branch}...`);
-    execSync(`git push -u origin ${branch}`, { stdio: "inherit", cwd: rootDir });
-
-    console.log(`✅ Push no GitHub concluído com sucesso!`);
-
-    if (modoNpm.isNpmPackage && versaoNpm) {
-      publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
-    } else {
-      aguardarDeployGitHubPages(timestampVersao, configAtual);
-    }
-  } catch (err) {
-    console.error(`\n❌ Falha durante o deploy:`, err.message);
+  const branch = configAtual.branch || "main";
+  const addRes = executarSilencioso("git add .", rootDir);
+  if (!addRes.ok) {
+    exibirCaixaErro("Erro ao preparar arquivos (git add)", addRes.stderr);
+    return configAtual;
   }
 
+  const statusRes = executarSilencioso("git status --porcelain", rootDir);
+  if (!statusRes.stdout) {
+    console.log(`\nℹ️  Nenhuma alteração pendente para publicar.`);
+    if (modoNpm.isNpmPackage && versaoNpm) {
+      publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
+    }
+    return configAtual;
+  }
+
+  const resumoArquivos = resumirAlteracoesGit(statusRes.stdout);
+  const tagMsg = versaoNpm ? `v${versaoNpm}` : `v${timestampVersao}`;
+  const commitMsgFormatada = `${tagMsg}: ${mensagemCommit}`;
+
+  console.log(`\n==================================================`);
+  console.log(`🚀 DEPLOY [${configAtual.projectName}] • ${tagMsg}`);
+  console.log(`📝 Mensagem: "${mensagemCommit}"`);
+  console.log(`📂 Escopo:   ${resumoArquivos}`);
+  console.log(`--------------------------------------------------`);
+
+  const commitRes = executarSilencioso(
+    `git commit -m "${commitMsgFormatada.replace(/"/g, '\\"')}"`,
+    rootDir
+  );
+  if (!commitRes.ok) {
+    exibirCaixaErro("Falha ao criar commit local", commitRes.stderr || commitRes.stdout);
+    return configAtual;
+  }
+
+  const hashMatch = commitRes.stdout.match(/\[[^\s]+\s+([a-f0-9]+)\]/i);
+  const hashCurto = hashMatch ? ` (${hashMatch[1]})` : "";
+  console.log(`✅ Commit criado${hashCurto}`);
+
+  process.stdout.write(`⏳ Enviando para GitHub (${remote.githubUser}/${remote.repoName}:${branch})... `);
+  const pushRes = executarSilencioso(`git push -u origin ${branch}`, rootDir);
+  if (!pushRes.ok) {
+    console.log(`❌ Falhou!`);
+    exibirCaixaErro(`Falha ao enviar para origin/${branch}`, pushRes.stderr || pushRes.stdout);
+    return configAtual;
+  }
+  console.log(`✅ Concluído!`);
+
+  if (modoNpm.isNpmPackage && versaoNpm) {
+    publicarNoNpm(modoNpm.npmPackageDir, versaoNpm);
+  } else {
+    aguardarDeployGitHubPages(timestampVersao, configAtual);
+  }
+
+  console.log(`==================================================`);
   return configAtual;
 }
 
