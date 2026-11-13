@@ -1,7 +1,7 @@
 /**
  * Auto-Updater do Pacote @nicolasarths/devserver
- * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente,
- * baixar e atualizar a pasta server/ local antes dos processos pós-save.
+ * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente e atualizar
+ * APENAS diretórios locais comprovadamente pertencentes ao @nicolasarths/devserver, sem tocar em pastas server/ de terceiros.
  */
 const fs = require("fs");
 const os = require("os");
@@ -15,23 +15,53 @@ const COOLDOWN_MS = 60 * 1000;
 let ultimaVerificacaoTimestamp = 0;
 let atualizacaoEmAndamento = false;
 
-function obterVersaoLocal(rootDir) {
+function isDiretorioDoDevServer(dir) {
+  const pkgPath = path.join(dir, "package.json");
+  if (!fs.existsSync(pkgPath)) return false;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return pkg.name === PACKAGE_NAME;
+  } catch (_) {
+    return false;
+  }
+}
+
+function localizarCopiaLocalInstalada(rootDir) {
+  // Verifica onde o código atual está rodando (__dirname) ou se existe cópia local do próprio devserver
   const candidatos = [
-    path.join(__dirname, "package.json"),
-    path.join(rootDir, "server", "package.json"),
-    path.join(rootDir, "package.json")
+    __dirname,
+    path.join(rootDir, ".devserver"),
+    path.join(rootDir, "devserver"),
+    path.join(rootDir, "server")
   ];
 
-  for (const pkgPath of candidatos) {
-    if (!fs.existsSync(pkgPath)) continue;
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-      if (pkg.name === PACKAGE_NAME && pkg.version) {
-        return pkg.version;
-      }
-    } catch (_) {}
+  for (const dir of candidatos) {
+    // Ignora cache global do npx/npm (_npx ou node_modules) pois o npx já baixa @latest sozinho
+    const norm = dir.replace(/\\/g, "/").toLowerCase();
+    if (norm.includes("/_npx/") || norm.includes("/node_modules/")) {
+      continue;
+    }
+
+    if (dir.startsWith(rootDir) && isDiretorioDoDevServer(dir)) {
+      return dir;
+    }
   }
+
   return null;
+}
+
+function obterVersaoLocal(destinoDir) {
+  const pkgPath = destinoDir
+    ? path.join(destinoDir, "package.json")
+    : path.join(__dirname, "package.json");
+
+  if (!fs.existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return pkg.name === PACKAGE_NAME ? pkg.version : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function compararSemver(remota, local) {
@@ -67,7 +97,7 @@ function limparCacheModulosServer(serverDir) {
   });
 }
 
-async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersao) {
+async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nic-devserver-"));
   const tgzPath = path.join(tempDir, "package.tgz");
   const extractDir = path.join(tempDir, "extracted");
@@ -87,11 +117,12 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersa
       throw new Error("Estrutura do pacote extraído inválida.");
     }
 
-    fs.mkdirSync(destinoServerDir, { recursive: true });
-    copiarArquivosAtualizados(packageRoot, destinoServerDir);
-    limparCacheModulosServer(destinoServerDir);
+    fs.mkdirSync(destinoDir, { recursive: true });
+    copiarArquivosAtualizados(packageRoot, destinoDir);
+    limparCacheModulosServer(destinoDir);
 
-    console.log(`🔄 [Auto-Update] Pasta server/ atualizada para v${novaVersao} com sucesso!`);
+    const nomePastaRel = path.relative(process.cwd(), destinoDir) || ".";
+    console.log(`🔄 [Auto-Update] Cópia local (${nomePastaRel}/) atualizada para v${novaVersao}!`);
     return true;
   } finally {
     try {
@@ -112,7 +143,11 @@ async function verificarEAtualizarServidor(rootDir, config) {
   atualizacaoEmAndamento = true;
 
   try {
-    const versaoLocal = obterVersaoLocal(rootDir);
+    // Só aplica auto-update em disco se houver uma cópia local comprovada do @nicolasarths/devserver
+    const copiaLocalDir = localizarCopiaLocalInstalada(rootDir);
+    if (!copiaLocalDir) return false;
+
+    const versaoLocal = obterVersaoLocal(copiaLocalDir);
     if (!versaoLocal) return false;
 
     const controller = new AbortController();
@@ -134,8 +169,7 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
     if (compararSemver(versaoRemota, versaoLocal) > 0) {
       console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
-      const pastaServerAlvo = path.join(rootDir, "server");
-      return await baixarEAplicarAtualizacao(tarballUrl, pastaServerAlvo, versaoRemota);
+      return await baixarEAplicarAtualizacao(tarballUrl, copiaLocalDir, versaoRemota);
     }
 
     return false;
@@ -146,4 +180,7 @@ async function verificarEAtualizarServidor(rootDir, config) {
   }
 }
 
-module.exports = { verificarEAtualizarServidor };
+module.exports = {
+  verificarEAtualizarServidor,
+  isDiretorioDoDevServer
+};

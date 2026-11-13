@@ -17,6 +17,7 @@ function iniciarWatcher(rootDir, config) {
     if (
       norm.includes(".git/") ||
       norm.includes("node_modules/") ||
+      norm.includes(".devserver/") ||
       norm.includes("modulos.json") ||
       norm.includes("projeto_completo") ||
       norm.includes(".devserver.json") ||
@@ -29,19 +30,15 @@ function iniciarWatcher(rootDir, config) {
     watchTimeout = setTimeout(async () => {
       ignorarEventosInternos = true;
       try {
-        // 1. Verifica e atualiza a pasta server/ se houver versão nova no NPM (com trava de 60s)
         await verificarEAtualizarServidor(rootDir, config);
 
-        // 2. Carrega dinamicamente builder e livereload (já pegando a versão nova se houve update)
         const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
         const { notificarRecarregamento } = require("./livereload");
 
-        // 3. Executa os processos pós-save normalmente
         executarHooksOpcionais(rootDir);
         gerarProjetoCompleto(rootDir, config.snapshotExtensions);
         notificarRecarregamento();
       } finally {
-        // Pequena janela para absorver eventos residualmente disparados pela cópia dos arquivos
         setTimeout(() => {
           ignorarEventosInternos = false;
         }, 300);

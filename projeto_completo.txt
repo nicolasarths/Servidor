@@ -1,8 +1,8 @@
 === ARQUIVO: \server\auto-updater.js ===
 /**
  * Auto-Updater do Pacote @nicolasarths/devserver
- * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente,
- * baixar e atualizar a pasta server/ local antes dos processos pós-save.
+ * Responsabilidade: Verificar no registro NPM (com trava de 60s) se há versão mais recente e atualizar
+ * APENAS diretórios locais comprovadamente pertencentes ao @nicolasarths/devserver, sem tocar em pastas server/ de terceiros.
  */
 const fs = require("fs");
 const os = require("os");
@@ -16,23 +16,53 @@ const COOLDOWN_MS = 60 * 1000;
 let ultimaVerificacaoTimestamp = 0;
 let atualizacaoEmAndamento = false;
 
-function obterVersaoLocal(rootDir) {
+function isDiretorioDoDevServer(dir) {
+  const pkgPath = path.join(dir, "package.json");
+  if (!fs.existsSync(pkgPath)) return false;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return pkg.name === PACKAGE_NAME;
+  } catch (_) {
+    return false;
+  }
+}
+
+function localizarCopiaLocalInstalada(rootDir) {
+  // Verifica onde o código atual está rodando (__dirname) ou se existe cópia local do próprio devserver
   const candidatos = [
-    path.join(__dirname, "package.json"),
-    path.join(rootDir, "server", "package.json"),
-    path.join(rootDir, "package.json")
+    __dirname,
+    path.join(rootDir, ".devserver"),
+    path.join(rootDir, "devserver"),
+    path.join(rootDir, "server")
   ];
 
-  for (const pkgPath of candidatos) {
-    if (!fs.existsSync(pkgPath)) continue;
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-      if (pkg.name === PACKAGE_NAME && pkg.version) {
-        return pkg.version;
-      }
-    } catch (_) {}
+  for (const dir of candidatos) {
+    // Ignora cache global do npx/npm (_npx ou node_modules) pois o npx já baixa @latest sozinho
+    const norm = dir.replace(/\\/g, "/").toLowerCase();
+    if (norm.includes("/_npx/") || norm.includes("/node_modules/")) {
+      continue;
+    }
+
+    if (dir.startsWith(rootDir) && isDiretorioDoDevServer(dir)) {
+      return dir;
+    }
   }
+
   return null;
+}
+
+function obterVersaoLocal(destinoDir) {
+  const pkgPath = destinoDir
+    ? path.join(destinoDir, "package.json")
+    : path.join(__dirname, "package.json");
+
+  if (!fs.existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    return pkg.name === PACKAGE_NAME ? pkg.version : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function compararSemver(remota, local) {
@@ -68,7 +98,7 @@ function limparCacheModulosServer(serverDir) {
   });
 }
 
-async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersao) {
+async function baixarEAplicarAtualizacao(tarballUrl, destinoDir, novaVersao) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nic-devserver-"));
   const tgzPath = path.join(tempDir, "package.tgz");
   const extractDir = path.join(tempDir, "extracted");
@@ -88,11 +118,12 @@ async function baixarEAplicarAtualizacao(tarballUrl, destinoServerDir, novaVersa
       throw new Error("Estrutura do pacote extraído inválida.");
     }
 
-    fs.mkdirSync(destinoServerDir, { recursive: true });
-    copiarArquivosAtualizados(packageRoot, destinoServerDir);
-    limparCacheModulosServer(destinoServerDir);
+    fs.mkdirSync(destinoDir, { recursive: true });
+    copiarArquivosAtualizados(packageRoot, destinoDir);
+    limparCacheModulosServer(destinoDir);
 
-    console.log(`🔄 [Auto-Update] Pasta server/ atualizada para v${novaVersao} com sucesso!`);
+    const nomePastaRel = path.relative(process.cwd(), destinoDir) || ".";
+    console.log(`🔄 [Auto-Update] Cópia local (${nomePastaRel}/) atualizada para v${novaVersao}!`);
     return true;
   } finally {
     try {
@@ -113,7 +144,11 @@ async function verificarEAtualizarServidor(rootDir, config) {
   atualizacaoEmAndamento = true;
 
   try {
-    const versaoLocal = obterVersaoLocal(rootDir);
+    // Só aplica auto-update em disco se houver uma cópia local comprovada do @nicolasarths/devserver
+    const copiaLocalDir = localizarCopiaLocalInstalada(rootDir);
+    if (!copiaLocalDir) return false;
+
+    const versaoLocal = obterVersaoLocal(copiaLocalDir);
     if (!versaoLocal) return false;
 
     const controller = new AbortController();
@@ -135,8 +170,7 @@ async function verificarEAtualizarServidor(rootDir, config) {
 
     if (compararSemver(versaoRemota, versaoLocal) > 0) {
       console.log(`\n⬆️ [Auto-Update] Nova versão encontrada no NPM: v${versaoRemota} (local: v${versaoLocal})`);
-      const pastaServerAlvo = path.join(rootDir, "server");
-      return await baixarEAplicarAtualizacao(tarballUrl, pastaServerAlvo, versaoRemota);
+      return await baixarEAplicarAtualizacao(tarballUrl, copiaLocalDir, versaoRemota);
     }
 
     return false;
@@ -147,7 +181,10 @@ async function verificarEAtualizarServidor(rootDir, config) {
   }
 }
 
-module.exports = { verificarEAtualizarServidor };
+module.exports = {
+  verificarEAtualizarServidor,
+  isDiretorioDoDevServer
+};
 
 === ARQUIVO: \server\builder.js ===
 /**
@@ -204,7 +241,6 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
   try {
     const destino = path.join(rootDir, "projeto_completo.txt");
 
-    // Apaga fisicamente o snapshot anterior antes de gerar o novo
     if (fs.existsSync(destino)) {
       fs.unlinkSync(destino);
     }
@@ -218,6 +254,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       "build",
       ".next",
       ".vscode",
+      ".devserver",
       "package-lock.json",
       "yarn.lock",
       "pnpm-lock.yaml",
@@ -669,7 +706,8 @@ function garantirGitIgnore(rootDir) {
     "node_modules/",
     ".DS_Store",
     "Thumbs.db",
-    ".devserver.json"
+    ".devserver.json",
+    ".devserver/"
   ];
 
   let conteudoAtual = fs.existsSync(gitignorePath)
@@ -1112,16 +1150,60 @@ module.exports = { criarServidorHttp };
 
 /**
  * Ponto de Entrada do Universal Dev Server
- * Responsabilidade: Inicializar build, watcher, servidor HTTP com fallback de porta e menu interativo na pasta atual.
+ * Responsabilidade: Verificar conflitos de arquivos server/server.js pré-existentes, iniciar build, watcher, HTTP e menu.
  */
+const fs = require("fs");
+const path = require("path");
 const { carregarConfig } = require("./config");
 const { criarServidorHttp } = require("./http");
 const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
 const { iniciarWatcher } = require("./watcher");
 const { iniciarMenuInterativo } = require("./menu");
+const { isDiretorioDoDevServer } = require("./auto-updater");
 
 const ROOT_DIR = process.cwd();
 const config = carregarConfig(ROOT_DIR);
+
+function verificarSalvaguardaServidorExistente(rootDir, isNpmPackage) {
+  if (isNpmPackage) return;
+
+  const serverJsRaiz = path.join(rootDir, "server.js");
+  const pastaServer = path.join(rootDir, "server");
+  const avisos = [];
+
+  if (fs.existsSync(serverJsRaiz) && fs.statSync(serverJsRaiz).isFile()) {
+    avisos.push(
+      `• Encontrado "server.js" na raiz do projeto. Se for um servidor antigo/manual de live-reload, você já pode deletá-lo (ou manter se for sua API backend).`
+    );
+  }
+
+  if (fs.existsSync(pastaServer) && fs.statSync(pastaServer).isDirectory()) {
+    const ehNossoPacote = isDiretorioDoDevServer(pastaServer);
+    const normAtual = __dirname.replace(/\\/g, "/").toLowerCase();
+
+    if (!ehNossoPacote) {
+      avisos.push(
+        `• Encontrada pasta "server/" própria do projeto. Por segurança, o @nicolasarths/devserver NÃO vai modificar nem sobrescrever essa pasta.`
+      );
+      avisos.push(
+        `  👉 Se essa pasta "server/" for uma versão antiga do nosso dev server sem package.json, delete-a e rode apenas: npx -y @nicolasarths/devserver@latest`
+      );
+    } else if (normAtual.includes("/_npx/")) {
+      avisos.push(
+        `• Você rodou via npx, mas ainda existe uma cópia local antiga em "server/". Você pode deletar a pasta "server/" do projeto para mantê-lo limpo!`
+      );
+    }
+  }
+
+  if (avisos.length > 0) {
+    console.log(`\n🛡️  [SALVAGUARDA DE ARQUIVOS DETECTADA]`);
+    avisos.forEach((msg) => console.log(msg));
+    console.log(``);
+  }
+}
+
+// 0. Verifica se já existe server.js ou pasta server/ no projeto antes de rodar
+verificarSalvaguardaServidorExistente(ROOT_DIR, config.isNpmPackage);
 
 // 1. Executa hooks e gera projeto_completo.txt na inicialização
 executarHooksOpcionais(ROOT_DIR);
@@ -1346,7 +1428,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Servidor de desenvolvimento com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
@@ -1380,6 +1462,7 @@ function iniciarWatcher(rootDir, config) {
     if (
       norm.includes(".git/") ||
       norm.includes("node_modules/") ||
+      norm.includes(".devserver/") ||
       norm.includes("modulos.json") ||
       norm.includes("projeto_completo") ||
       norm.includes(".devserver.json") ||
@@ -1392,19 +1475,15 @@ function iniciarWatcher(rootDir, config) {
     watchTimeout = setTimeout(async () => {
       ignorarEventosInternos = true;
       try {
-        // 1. Verifica e atualiza a pasta server/ se houver versão nova no NPM (com trava de 60s)
         await verificarEAtualizarServidor(rootDir, config);
 
-        // 2. Carrega dinamicamente builder e livereload (já pegando a versão nova se houve update)
         const { executarHooksOpcionais, gerarProjetoCompleto } = require("./builder");
         const { notificarRecarregamento } = require("./livereload");
 
-        // 3. Executa os processos pós-save normalmente
         executarHooksOpcionais(rootDir);
         gerarProjetoCompleto(rootDir, config.snapshotExtensions);
         notificarRecarregamento();
       } finally {
-        // Pequena janela para absorver eventos residualmente disparados pela cópia dos arquivos
         setTimeout(() => {
           ignorarEventosInternos = false;
         }, 300);

@@ -52,7 +52,6 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
   try {
     const destino = path.join(rootDir, "projeto_completo.txt");
 
-    // Apaga fisicamente o snapshot anterior antes de gerar o novo
     if (fs.existsSync(destino)) {
       fs.unlinkSync(destino);
     }
@@ -66,6 +65,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       "build",
       ".next",
       ".vscode",
+      ".devserver",
       "package-lock.json",
       "yarn.lock",
       "pnpm-lock.yaml",
