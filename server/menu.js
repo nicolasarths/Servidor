@@ -1,12 +1,14 @@
 /**
  * Menu Interativo do Terminal
- * Responsabilidade: Exibir opções numeradas, rotear escolhas do usuário e disparar deploys sem necessidade de decorar comandos.
+ * Responsabilidade: Exibir opções numeradas, rotear escolhas do usuário e disparar deploys (usando "Update sem descrição" se der Enter vazio).
  */
 const readline = require("readline");
 const { salvarConfig, detectarGitRemote } = require("./config");
 const { executarAssistenteGitHub, garantirIdentidadeGit } = require("./github");
 const { perguntar } = require("./github/prompts");
 const { publicarAtualizacao } = require("./deploy");
+
+const MENSAGEM_PADRAO = "Update sem descrição";
 
 function exibirMenu(rootDir, config) {
   const remote = detectarGitRemote(rootDir);
@@ -26,7 +28,7 @@ function exibirMenu(rootDir, config) {
   console.log(`  [5] 📊 Ver status detalhado`);
   console.log(`  [6] 🧹 Limpar tela`);
   console.log(`  [0] ❌ Sair e encerrar servidor`);
-  console.log(`  💡 Atalho: digite a mensagem do commit direto e dê ENTER!`);
+  console.log(`  💡 Atalho: digite a mensagem e dê ENTER (ou só ENTER para "${MENSAGEM_PADRAO}")`);
   console.log(`--------------------------------------------------`);
 }
 
@@ -72,10 +74,6 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
     if (ocupado) return;
 
     const entrada = linha.trim();
-    if (!entrada) {
-      exibirMenu(rootDir, configAtual);
-      return;
-    }
 
     ocupado = true;
     try {
@@ -85,12 +83,8 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
       }
 
       if (entrada === "1") {
-        const msg = await perguntar(rl, `\n📝 Digite a mensagem do commit: `);
-        if (msg) {
-          configAtual = await publicarAtualizacao(rl, msg, rootDir, configAtual);
-        } else {
-          console.log("⚠️ Publicação cancelada (mensagem vazia).");
-        }
+        const msg = await perguntar(rl, `\n📝 Digite a mensagem do commit [${MENSAGEM_PADRAO}]: `);
+        configAtual = await publicarAtualizacao(rl, msg || MENSAGEM_PADRAO, rootDir, configAtual);
         exibirMenu(rootDir, configAtual);
         return;
       }
@@ -139,8 +133,9 @@ async function iniciarMenuInterativo(rootDir, configInicial) {
         return;
       }
 
-      // Qualquer outro texto digitado é tratado diretamente como mensagem de commit
-      configAtual = await publicarAtualizacao(rl, entrada, rootDir, configAtual);
+      // Se apertar apenas ENTER (vazio) ou digitar texto livre, publica direto!
+      const mensagemFinal = entrada || MENSAGEM_PADRAO;
+      configAtual = await publicarAtualizacao(rl, mensagemFinal, rootDir, configAtual);
       exibirMenu(rootDir, configAtual);
     } finally {
       ocupado = false;
