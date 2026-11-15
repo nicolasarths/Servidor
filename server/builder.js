@@ -28,7 +28,9 @@ function executarHooksOpcionais(rootDir) {
 
     arquivos.filter((f) => f.endsWith(".json")).forEach((arq) => {
       try {
-        const conteudo = JSON.parse(fs.readFileSync(path.join(caminhoPasta, "utf-8")));
+        // CORREÇÃO: Faltava o parâmetro 'arq' no path.join. Antes tentava ler um arquivo de nome "utf-8"
+        const conteudo = JSON.parse(fs.readFileSync(path.join(caminhoPasta, arq), "utf-8"));
+        
         if (Array.isArray(conteudo)) {
           conteudo.forEach((item, idx) => {
             if (!item.id) item.id = `${nomePasta}-${arq.replace(".json", "")}-${idx}`;
@@ -45,7 +47,8 @@ function executarHooksOpcionais(rootDir) {
   fs.writeFileSync(modulosPath, JSON.stringify(estrutura, null, 2), { encoding: "utf-8", flag: "w" });
 }
 
-function gerarStringArvore(dir, extensoesValidas, prefixo = "", ignorarNomes = new Set()) {
+// CORREÇÃO: Removido 'extensoesValidas' da assinatura para exibir TODOS os arquivos na árvore
+function gerarStringArvore(dir, prefixo = "", ignorarNomes = new Set()) {
   let output = "";
   let itens;
   try {
@@ -57,14 +60,17 @@ function gerarStringArvore(dir, extensoesValidas, prefixo = "", ignorarNomes = n
   const itensValidos = itens.filter(item => {
     try {
       const nomeLower = item.name.toLowerCase();
+      // Mantemos o bloqueio a arquivos do sistema, node_modules e os próprios txts do servidor
       if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo") || nomeLower.startsWith("arvore_de_arquivos")) {
         return false;
       }
-      if (item.isFile()) {
-         const ext = path.extname(item.name).toLowerCase();
-         return extensoesValidas.includes(ext);
+      
+      // CORREÇÃO: Retorna verdadeiro para todos os arquivos válidos, sem filtrar por extensão,
+      // para que o organograma não esconda arquivos de imagem, .env, arquivos locais, etc.
+      if (item.isFile() || item.isDirectory()) {
+         return true;
       }
-      return item.isDirectory(); 
+      return false;
     } catch(e) {
       return false;
     }
@@ -81,7 +87,7 @@ function gerarStringArvore(dir, extensoesValidas, prefixo = "", ignorarNomes = n
 
     if (item.isDirectory()) {
       const novoPrefixo = prefixo + (isUltimo ? "    " : "│   ");
-      output += gerarStringArvore(path.join(dir, item.name), extensoesValidas, novoPrefixo, ignorarNomes);
+      output += gerarStringArvore(path.join(dir, item.name), novoPrefixo, ignorarNomes);
     }
   });
   return output;
@@ -95,8 +101,10 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
     const destino = path.join(rootDir, "projeto_completo.txt");
     const destinoArvore = path.join(rootDir, "arvore_de_arquivos.txt");
 
-    if (fs.existsSync(destino)) fs.unlinkSync(destino);
-    if (fs.existsSync(destinoArvore)) fs.unlinkSync(destinoArvore);
+    // CORREÇÃO: Removidos os fs.unlinkSync() do início.
+    // Motivo: No Windows, tentar deletar um arquivo enquanto ele está focado ou lido pelo VS Code
+    // dispara o erro (EBUSY/EPERM), que cancela a geração do arquivo. O fs.writeFileSync com 
+    // a flag 'w' já cria ou limpa e sobrescreve o conteúdo automaticamente de forma segura.
 
     let output = "";
 
@@ -121,13 +129,14 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
     try {
       const nomePastaProjeto = path.basename(rootDir);
       let conteudoArvore = `/${nomePastaProjeto}\n`;
-      conteudoArvore += gerarStringArvore(rootDir, extensoesValidas, "", ignorarNomes);
+      // CORREÇÃO: A chamada perde o argumento de extensões para montar o organograma fiel.
+      conteudoArvore += gerarStringArvore(rootDir, "", ignorarNomes);
       fs.writeFileSync(destinoArvore, conteudoArvore, { encoding: "utf-8", flag: "w" });
     } catch (e) {
       console.error("❌ [Builder] Falha ao escrever arvore_de_arquivos.txt:", e);
     }
 
-    // Geração do projeto_completo.txt
+    // Geração do projeto_completo.txt (Neste, mantemos o extensoesValidas para não poluir o prompt do LLM)
     function varrerDiretorio(dir) {
       const itens = fs.readdirSync(dir, { withFileTypes: true });
       for (const item of itens) {
