@@ -54,17 +54,20 @@ function gerarStringArvore(dir, extensoesValidas, prefixo = "", ignorarNomes = n
     return output;
   }
 
-  // Filtra diretórios e arquivos válidos e ordena (pastas primeiro, ordem alfabética)
   const itensValidos = itens.filter(item => {
-    const nomeLower = item.name.toLowerCase();
-    if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo") || nomeLower.startsWith("arvore_de_arquivos")) {
+    try {
+      const nomeLower = item.name.toLowerCase();
+      if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo") || nomeLower.startsWith("arvore_de_arquivos")) {
+        return false;
+      }
+      if (item.isFile()) {
+         const ext = path.extname(item.name).toLowerCase();
+         return extensoesValidas.includes(ext);
+      }
+      return item.isDirectory(); 
+    } catch(e) {
       return false;
     }
-    if (item.isFile()) {
-       const ext = path.extname(item.name).toLowerCase();
-       return extensoesValidas.includes(ext);
-    }
-    return true; // Mantém pastas para entrar nelas
   }).sort((a, b) => {
     if (a.isDirectory() && !b.isDirectory()) return -1;
     if (!a.isDirectory() && b.isDirectory()) return 1;
@@ -92,12 +95,8 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
     const destino = path.join(rootDir, "projeto_completo.txt");
     const destinoArvore = path.join(rootDir, "arvore_de_arquivos.txt");
 
-    if (fs.existsSync(destino)) {
-      fs.unlinkSync(destino);
-    }
-    if (fs.existsSync(destinoArvore)) {
-      fs.unlinkSync(destinoArvore);
-    }
+    if (fs.existsSync(destino)) fs.unlinkSync(destino);
+    if (fs.existsSync(destinoArvore)) fs.unlinkSync(destinoArvore);
 
     let output = "";
 
@@ -118,11 +117,15 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       "arvore_de_arquivos.txt"
     ]);
 
-    // Geração do arvore_de_arquivos.txt
-    const nomePastaProjeto = path.basename(rootDir);
-    let conteudoArvore = `/${nomePastaProjeto}\n`;
-    conteudoArvore += gerarStringArvore(rootDir, extensoesValidas, "", ignorarNomes);
-    fs.writeFileSync(destinoArvore, conteudoArvore, { encoding: "utf-8", flag: "w" });
+    // Geração da Árvore isolada em seu próprio try/catch
+    try {
+      const nomePastaProjeto = path.basename(rootDir);
+      let conteudoArvore = `/${nomePastaProjeto}\n`;
+      conteudoArvore += gerarStringArvore(rootDir, extensoesValidas, "", ignorarNomes);
+      fs.writeFileSync(destinoArvore, conteudoArvore, { encoding: "utf-8", flag: "w" });
+    } catch (e) {
+      console.error("❌ [Builder] Falha ao escrever arvore_de_arquivos.txt:", e);
+    }
 
     // Geração do projeto_completo.txt
     function varrerDiretorio(dir) {
@@ -151,7 +154,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
     varrerDiretorio(rootDir);
     fs.writeFileSync(destino, output, { encoding: "utf-8", flag: "w" });
   } catch (err) {
-    console.error("❌ [Builder] Erro ao gerar os snapshots do projeto:", err.message);
+    console.error("❌ [Builder] Erro crítico ao gerar snapshots:", err.message);
   } finally {
     isGenerating = false;
   }
