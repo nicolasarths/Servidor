@@ -1,0 +1,22 @@
+/Servidor
+├── server
+│   ├── github
+│   │   ├── git-identity.js
+│   │   ├── git-local.js
+│   │   ├── github-api.js
+│   │   ├── index.js
+│   │   └── prompts.js
+│   ├── auto-updater.js
+│   ├── builder.js
+│   ├── config.js
+│   ├── deploy.js
+│   ├── http.js
+│   ├── index.js
+│   ├── livereload.js
+│   ├── logger.js
+│   ├── menu.js
+│   ├── package.json
+│   ├── README.MD
+│   └── watcher.js
+├── .gitignore
+└── README.MD
