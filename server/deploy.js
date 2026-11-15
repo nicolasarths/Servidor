@@ -213,6 +213,14 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
     aguardarDeployGitHubPages(timestampVersao, configAtual);
   }
 
+  // Remove os arquivos de snapshot após o deploy para não poluir o repositório de trabalho depois do push
+  try {
+    const destino = path.join(rootDir, "projeto_completo.txt");
+    const destinoArvore = path.join(rootDir, "arvore_de_arquivos.txt");
+    if (fs.existsSync(destino)) fs.unlinkSync(destino);
+    if (fs.existsSync(destinoArvore)) fs.unlinkSync(destinoArvore);
+  } catch(e) {}
+
   console.log(`==================================================`);
   return configAtual;
 }

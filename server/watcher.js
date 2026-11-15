@@ -23,6 +23,7 @@ function iniciarWatcher(rootDir, config) {
       norm.includes(".devserver/") ||
       norm.includes("modulos.json") ||
       norm.includes("projeto_completo") ||
+      norm.includes("arvore_de_arquivos") ||
       norm.includes(".devserver.json") ||
       norm.includes("server.config.json")
     ) {
@@ -38,7 +39,7 @@ function iniciarWatcher(rootDir, config) {
 
         executarHooksOpcionais(rootDir);
         gerarProjetoCompleto(rootDir, config.snapshotExtensions);
-        console.log(`📝 projeto_completo.txt salvo com sucesso.`);
+        console.log(`📝 projeto_completo.txt e arvore_de_arquivos.txt salvos com sucesso.`);
 
         const resUpdate = await verificarEAtualizarServidor(rootDir, config);
         if (resUpdate.status === "up-to-date") {

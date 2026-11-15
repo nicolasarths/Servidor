@@ -724,6 +724,14 @@ async function publicarAtualizacao(rl, mensagemCommit, rootDir, config) {
     aguardarDeployGitHubPages(timestampVersao, configAtual);
   }
 
+  // Remove os arquivos de snapshot após o deploy para não poluir o repositório de trabalho depois do push
+  try {
+    const destino = path.join(rootDir, "projeto_completo.txt");
+    const destinoArvore = path.join(rootDir, "arvore_de_arquivos.txt");
+    if (fs.existsSync(destino)) fs.unlinkSync(destino);
+    if (fs.existsSync(destinoArvore)) fs.unlinkSync(destinoArvore);
+  } catch(e) {}
+
   console.log(`==================================================`);
   return configAtual;
 }
@@ -834,7 +842,8 @@ function garantirGitIgnore(rootDir) {
     "Thumbs.db",
     ".devserver.json",
     ".devserver/",
-    "devserver.js"
+    "devserver.js",
+    "arvore_de_arquivos.txt"
   ];
 
   let conteudoAtual = fs.existsSync(gitignorePath)
@@ -1593,7 +1602,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Servidor de desenvolvimento zero-config com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
@@ -1690,6 +1699,7 @@ function iniciarWatcher(rootDir, config) {
       norm.includes(".devserver/") ||
       norm.includes("modulos.json") ||
       norm.includes("projeto_completo") ||
+      norm.includes("arvore_de_arquivos") ||
       norm.includes(".devserver.json") ||
       norm.includes("server.config.json")
     ) {
@@ -1705,7 +1715,7 @@ function iniciarWatcher(rootDir, config) {
 
         executarHooksOpcionais(rootDir);
         gerarProjetoCompleto(rootDir, config.snapshotExtensions);
-        console.log(`📝 projeto_completo.txt salvo com sucesso.`);
+        console.log(`📝 projeto_completo.txt e arvore_de_arquivos.txt salvos com sucesso.`);
 
         const resUpdate = await verificarEAtualizarServidor(rootDir, config);
         if (resUpdate.status === "up-to-date") {

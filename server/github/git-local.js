@@ -14,7 +14,8 @@ function garantirGitIgnore(rootDir) {
     "Thumbs.db",
     ".devserver.json",
     ".devserver/",
-    "devserver.js"
+    "devserver.js",
+    "arvore_de_arquivos.txt"
   ];
 
   let conteudoAtual = fs.existsSync(gitignorePath)
