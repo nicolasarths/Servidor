@@ -238,7 +238,7 @@ module.exports = {
 === ARQUIVO: \server\builder.js ===
 /**
  * Gerador de Snapshot e Hooks de Build
- * Responsabilidade: Apagar o snapshot anterior, gerar projeto_completo.txt limpo na raiz do projeto e executar hooks opcionais.
+ * Responsabilidade: Apagar o snapshot anterior, gerar projeto_completo.txt e arvore_de_arquivos.txt limpos na raiz do projeto e executar hooks opcionais.
  */
 const fs = require("fs");
 const path = require("path");
@@ -266,7 +266,7 @@ function executarHooksOpcionais(rootDir) {
 
     arquivos.filter((f) => f.endsWith(".json")).forEach((arq) => {
       try {
-        const conteudo = JSON.parse(fs.readFileSync(path.join(caminhoPasta, arq), "utf-8"));
+        const conteudo = JSON.parse(fs.readFileSync(path.join(caminhoPasta, "utf-8")));
         if (Array.isArray(conteudo)) {
           conteudo.forEach((item, idx) => {
             if (!item.id) item.id = `${nomePasta}-${arq.replace(".json", "")}-${idx}`;
@@ -283,15 +283,58 @@ function executarHooksOpcionais(rootDir) {
   fs.writeFileSync(modulosPath, JSON.stringify(estrutura, null, 2), { encoding: "utf-8", flag: "w" });
 }
 
+function gerarStringArvore(dir, extensoesValidas, prefixo = "", ignorarNomes = new Set()) {
+  let output = "";
+  let itens;
+  try {
+    itens = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return output;
+  }
+
+  // Filtra diretórios e arquivos válidos e ordena (pastas primeiro, ordem alfabética)
+  const itensValidos = itens.filter(item => {
+    const nomeLower = item.name.toLowerCase();
+    if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo") || nomeLower.startsWith("arvore_de_arquivos")) {
+      return false;
+    }
+    if (item.isFile()) {
+       const ext = path.extname(item.name).toLowerCase();
+       return extensoesValidas.includes(ext);
+    }
+    return true; // Mantém pastas para entrar nelas
+  }).sort((a, b) => {
+    if (a.isDirectory() && !b.isDirectory()) return -1;
+    if (!a.isDirectory() && b.isDirectory()) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  itensValidos.forEach((item, index) => {
+    const isUltimo = index === itensValidos.length - 1;
+    const conector = isUltimo ? "└── " : "├── ";
+    output += `${prefixo}${conector}${item.name}\n`;
+
+    if (item.isDirectory()) {
+      const novoPrefixo = prefixo + (isUltimo ? "    " : "│   ");
+      output += gerarStringArvore(path.join(dir, item.name), extensoesValidas, novoPrefixo, ignorarNomes);
+    }
+  });
+  return output;
+}
+
 function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css", ".json"]) {
   if (isGenerating) return;
   isGenerating = true;
 
   try {
     const destino = path.join(rootDir, "projeto_completo.txt");
+    const destinoArvore = path.join(rootDir, "arvore_de_arquivos.txt");
 
     if (fs.existsSync(destino)) {
       fs.unlinkSync(destino);
+    }
+    if (fs.existsSync(destinoArvore)) {
+      fs.unlinkSync(destinoArvore);
     }
 
     let output = "";
@@ -309,15 +352,23 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
       "yarn.lock",
       "pnpm-lock.yaml",
       ".devserver.json",
-      "server.config.json"
+      "server.config.json",
+      "arvore_de_arquivos.txt"
     ]);
 
+    // Geração do arvore_de_arquivos.txt
+    const nomePastaProjeto = path.basename(rootDir);
+    let conteudoArvore = `/${nomePastaProjeto}\n`;
+    conteudoArvore += gerarStringArvore(rootDir, extensoesValidas, "", ignorarNomes);
+    fs.writeFileSync(destinoArvore, conteudoArvore, { encoding: "utf-8", flag: "w" });
+
+    // Geração do projeto_completo.txt
     function varrerDiretorio(dir) {
       const itens = fs.readdirSync(dir, { withFileTypes: true });
       for (const item of itens) {
         const nomeLower = item.name.toLowerCase();
 
-        if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo")) {
+        if (ignorarNomes.has(nomeLower) || nomeLower.startsWith("projeto_completo") || nomeLower.startsWith("arvore_de_arquivos")) {
           continue;
         }
 
@@ -338,7 +389,7 @@ function gerarProjetoCompleto(rootDir, extensoesValidas = [".js", ".html", ".css
     varrerDiretorio(rootDir);
     fs.writeFileSync(destino, output, { encoding: "utf-8", flag: "w" });
   } catch (err) {
-    console.error("❌ [Builder] Erro ao gerar projeto_completo.txt:", err.message);
+    console.error("❌ [Builder] Erro ao gerar os snapshots do projeto:", err.message);
   } finally {
     isGenerating = false;
   }
@@ -1542,7 +1593,7 @@ module.exports = { iniciarMenuInterativo };
 === ARQUIVO: \server\package.json ===
 {
   "name": "@nicolasarths/devserver",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Servidor de desenvolvimento zero-config com live-reload e deploy automático para GitHub Pages",
   "main": "index.js",
   "bin": {
